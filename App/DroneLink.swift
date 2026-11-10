@@ -12,11 +12,40 @@ final class DroneLink: ObservableObject {
     @Published var state = "idle"
     @Published var lastReplyHex = ""
     @Published var repliesSeen = 0
+    @Published var idleSent = 0
 
     private var connection: NWConnection?
     private var timer: DispatchSourceTimer?
+    private var idleTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "gptkun.dronelink")
     private let heartbeat = Data([0x01, 0x01])
+
+    /// pyDroneWire's 21-byte GL control frame with every stick centred (0x80),
+    /// command byte 0x00 and its constant speed byte 0x02. Checksum is the XOR of
+    /// bytes 3...18, which is 0x02 here. It carries no takeoff, land, flip or
+    /// calibrate bit. Only used by the diagnostic "last resort" toggle.
+    private let idleFrame = Data([0x03, 0x66, 0x14,
+                                  0x80, 0x80, 0x80, 0x80,
+                                  0x00, 0x02,
+                                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                  0x02, 0x99])
+
+    func startIdleFrames() {
+        stopIdleFrames()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(50))
+        t.setEventHandler { [weak self] in
+            guard let self, let c = self.connection else { return }
+            c.send(content: self.idleFrame, completion: .contentProcessed { _ in })
+            DispatchQueue.main.async { self.idleSent += 1 }
+        }
+        t.resume()
+        idleTimer = t
+    }
+
+    func stopIdleFrames() {
+        idleTimer?.cancel(); idleTimer = nil
+    }
 
     func start(host: String, port: UInt16 = 7099) {
         stop()
@@ -51,6 +80,7 @@ final class DroneLink: ObservableObject {
     }
 
     func stop() {
+        stopIdleFrames()
         timer?.cancel(); timer = nil
         connection?.cancel(); connection = nil
         DispatchQueue.main.async { self.state = "idle" }

@@ -7,21 +7,28 @@ import MobileVLCKit
 
 /// Collects VLC's own log so stream problems can be read on the phone screen.
 final class ScreenLogger: NSObject, VLCLogging, ObservableObject {
-    var level: VLCLogLevel = .warning
+    var level: VLCLogLevel = .debug
     @Published var lines: [String] = []
+    /// Debug chatter is kept only for the modules on the stream path.
+    private let watched = ["live555", "mjpeg", "jpeg", "avcodec", "videotoolbox", "vout", "packetizer", "decoder", "rtp", "rtsp"]
 
     func handleMessage(_ message: String, logLevel level: VLCLogLevel, context: VLCLogContext?) {
         let tag: String
         switch level {
         case .error: tag = "E"
         case .warning: tag = "W"
-        default: tag = "I"
+        case .info: tag = "I"
+        default: tag = "D"
         }
         let module = context?.module ?? ""
+        if level != .error && level != .warning {
+            let hay = (module + " " + message).lowercased()
+            guard watched.contains(where: { hay.contains($0) }) else { return }
+        }
         let line = "\(tag) \(module): \(message)"
         DispatchQueue.main.async {
             self.lines.append(line)
-            if self.lines.count > 40 { self.lines.removeFirst(self.lines.count - 40) }
+            if self.lines.count > 60 { self.lines.removeFirst(self.lines.count - 60) }
         }
     }
 
@@ -132,10 +139,12 @@ struct ContentView: View {
     @StateObject private var video = VideoSession()
     @StateObject private var link = DroneLink()
     @StateObject private var probe = PortProbe()
+    @StateObject private var rtsp = RTSPProbe()
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
     @AppStorage("sendHeartbeat") private var sendHeartbeat = true
     @AppStorage("rtspTCP") private var rtspTCP = false
     @AppStorage("rotation") private var rotation = 0.0
+    @State private var idleFrames = false
 
     private var host: String { droneHost.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var hostIsValid: Bool {
@@ -149,7 +158,15 @@ struct ContentView: View {
 
     private func disconnect() {
         video.stop()
+        rtsp.stop()
+        idleFrames = false
         link.stop()
+    }
+
+    private func runRTSPProbe() {
+        video.stop()                      // the drone serves one video client at a time
+        if sendHeartbeat, link.state == "idle" { link.start(host: host) }
+        rtsp.start(host: host, overTCP: rtspTCP)
     }
 
     var body: some View {
@@ -157,7 +174,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 002 - Camera only, with diagnostics")
+                Text("Experiment 003 - Camera only, VLC-free RTSP probe")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -227,8 +244,48 @@ struct ContentView: View {
                 }
                 .font(.footnote.monospaced())
 
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("RTSP probe (no VLC)").font(.headline)
+                    Text("Talks RTSP to the drone directly and counts raw video packets. Stops the VLC view first.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Button("Run RTSP probe") { runRTSPProbe() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!hostIsValid || rtsp.running)
+                        Button("Stop probe") { rtsp.stop() }
+                            .buttonStyle(.bordered)
+                            .disabled(!rtsp.running)
+                    }
+                    Text("rtp packets: \(rtsp.rtpPackets)  bytes: \(rtsp.rtpBytes)")
+                        .font(.footnote.monospaced())
+                    if !rtsp.rtpInfo.isEmpty {
+                        Text(rtsp.rtpInfo).font(.system(size: 10, design: .monospaced))
+                    }
+                    ForEach(Array(rtsp.log.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.system(size: 10, design: .monospaced))
+                    }
+                }
+
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Last resort (props OFF)").font(.headline)
+                    Toggle("Send neutral stick frame at 20 Hz", isOn: $idleFrames)
+                        .font(.callout)
+                        .onChange(of: idleFrames) { on in
+                            if on {
+                                if link.state == "idle" { link.start(host: host) }
+                                link.startIdleFrames()
+                            } else {
+                                link.stopIdleFrames()
+                            }
+                        }
+                    Text("Some units only stream while control frames flow. This is the 21-byte frame pyDroneWire sends with all sticks centred and no command bit set. It does not arm, take off or spin motors, but keep propellers off while testing. Sent: \(link.idleSent)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("VLC log (warnings and errors)").font(.headline)
+                    Text("VLC log (stream modules)").font(.headline)
                     if video.logger.lines.isEmpty {
                         Text("nothing yet").foregroundStyle(.secondary)
                     }
@@ -238,7 +295,7 @@ struct ContentView: View {
                 }
 
                 Divider()
-                Label("No motor, takeoff, landing, or joystick commands exist in this build.", systemImage: "shield.checkered")
+                Label("No takeoff, landing, flip or joystick input exists in this build. The only control-port traffic is the keep-alive and, if you switch it on, the centred idle frame above.", systemImage: "shield.checkered")
                     .font(.callout)
             }
             .padding()
