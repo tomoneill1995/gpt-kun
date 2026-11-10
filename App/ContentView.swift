@@ -35,7 +35,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 004 - Native viewer, no VLC")
+                Text("Experiment 005 - Native viewer, 4:2:0 fix")
                     .foregroundStyle(.secondary)
 
                 ZStack {

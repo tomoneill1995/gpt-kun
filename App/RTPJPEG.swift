@@ -2,7 +2,7 @@ import Foundation
 
 /// Reassembles RTP/JPEG (RFC 2435) packets into complete JPEG files.
 ///
-/// The drone sends payload type 26, JPEG type 65 (4:2:2 with restart markers),
+/// The drone sends payload type 26, JPEG type 65 (4:2:0 with restart markers),
 /// Q 255 (quantisation tables carried in-band in the first fragment of each frame),
 /// 240x320. Each frame arrives as several fragments identified by a byte offset;
 /// the RTP marker bit flags the last fragment. The entropy-coded scan is sent
@@ -127,8 +127,9 @@ final class RTPJPEGAssembler {
             out.append(contentsOf: [0xFF, 0xDD, 0x00, 0x04, UInt8(h.dri >> 8), UInt8(h.dri & 0xFF)])
         }
 
-        // SOF0, baseline, 3 components. Type bit 0 selects 4:2:2 (1) or 4:2:0 (0).
-        let ySampling: UInt8 = (h.type & 1) == 1 ? 0x21 : 0x22
+        // SOF0, baseline, 3 components. RFC 2435: type 0 is 4:2:2 (Y sampling 2x1),
+        // type 1 is 4:2:0 (Y sampling 2x2); bit 6 only adds restart markers.
+        let ySampling: UInt8 = (h.type & 1) == 1 ? 0x22 : 0x21
         out.append(contentsOf: [0xFF, 0xC0, 0x00, 0x11, 0x08,
                                 UInt8(h.height >> 8), UInt8(h.height & 0xFF),
                                 UInt8(h.width >> 8), UInt8(h.width & 0xFF),
