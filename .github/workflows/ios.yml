@@ -1,0 +1,31 @@
+name: Build unsigned iPhone app
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Install CocoaPods
+        run: pod install --repo-update
+      - name: Build device app unsigned
+        run: |
+          set -o pipefail
+          xcodebuild -workspace GPTKunCamera.xcworkspace -scheme GPTKunCamera -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+      - name: Package IPA
+        run: |
+          mkdir -p output/Payload
+          cp -R build/Build/Products/Release-iphoneos/GPTKunCamera.app output/Payload/
+          cd output
+          zip -qr GPTKunCamera-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPTKunCamera-unsigned-ipa
+          path: output/GPTKunCamera-unsigned.ipa

@@ -1,0 +1,6 @@
+.DS_Store
+build/
+Pods/
+*.xcworkspace/
+*.xcodeproj/
+output/
