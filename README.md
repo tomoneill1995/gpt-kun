@@ -50,7 +50,12 @@ ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay rtsp://192.168.1.1:
 ## Status
 
 - v0.1 to v0.3: pipeline proven, drone type confirmed (RTSP, 192.168.1.1), raw video packets received by the probe.
-- v0.4: native viewer. First build that should show a picture.
+- v0.4: native viewer, first picture (garbled: wrong chroma sampling).
+- **v0.5: clean live video, 240x320 at about 20 fps, confirmed on FLOW-UFO-985264 on 2026-11-11.** Camera phase complete.
+
+## Next phase: wings
+
+Manual flight with a local safety layer, in this order: a watchdog that lands or cuts motors when the link or the UI goes quiet, an emergency stop that works independently of everything else, then on-screen sticks, then takeoff and land. The 21-byte control frame is confirmed by the drone (lights go solid on the neutral frame). Only after that does GPT-kun get a restricted set of actions.
 
 ## Next
 
