@@ -23,7 +23,12 @@ Sources: pyDroneWire (`drone_controller.py`), [Juliii-p/e88-drone-pc-control](ht
 - Video: `rtsp://192.168.1.1:7070/webcam`, RTP over UDP, MJPEG. Front and bottom camera share the URL; switching is done on the control port. After a switch, reopen the RTSP session (pyDroneWire waits 1.5 s and retries up to 5 times). Camera can be mounted sideways; some units need 90 or 270 degree rotation.
 - Camera switch: single datagram `06 01` (front) or `06 02` (bottom) to 7099.
 - Drone telemetry: a few bytes about once per second. First byte is a module id (83 seen on Juliii-p's unit). None of the sources parse it further.
-- **Our drone (FLOW-UFO-985264, observed 2026-11-10):** TCP 7070 open, replies to the `01 01` keep-alive with 11 bytes `65 02 31 46 31 46 00 00 00 00 00`. First byte 0x65 = 101 falls in RC-Swamp's GL range (90-101), so the 21-byte GL stick packet below is the one to use later, not the 9-byte Legacy one. Reply rate looked higher than 1/s (993 replies within one session). VLC reached the playing state on the first build but the picture stayed black; under investigation with v0.2 diagnostics.
+- **Our drone (FLOW-UFO-985264, observed 2026-11-10/11):**
+  - TCP 7070 open. Replies to the `01 01` keep-alive with 11 bytes `65 02 31 46 31 46 00 00 00 00 00`, roughly 8 per second. First byte 0x65 = 101 is in RC-Swamp's GL range, so the 21-byte GL stick packet is the right one.
+  - RTSP server: `OPTIONS` answers `Public: DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE`. SDP: `s=Test`, `a=type:broadcast`, `c=IN IP4 0.0.0.0`, `m=video 0 RTP/AVP 26`, `a=control:track0`, content-base `rtsp://192.168.1.1:7070/webcam/`. `SETUP` with `RTP/AVP/TCP;unicast;interleaved=0-1` is refused with **461 Unsupported Transport**: UDP only. UDP SETUP returns `server_port=52042-52043` and a 32-char hex session id. No RTP-Info on PLAY.
+  - Video: standard RTP/JPEG (RFC 2435), payload type 26, **JPEG type 65** (4:2:2 with restart markers), **Q 255** (quantisation tables in-band), **240x320** portrait, about 27 packets/s and 107 KB/s observed. Frames are roughly 9.4 KB.
+  - MobileVLCKit 3.7.5 reached "playing" but decoded nothing over UDP, with no error logged, while a plain Swift RTSP client on the same phone received the packets. Cause not identified; VLC was dropped in v0.4 in favour of a native RFC 2435 reassembler and ImageIO decode.
+  - Sending pyDroneWire's centred 21-byte idle frame at 20 Hz turns the drone's lights from flashing to solid. That is the "controller connected" state, and it confirms the GL packet layout and checksum. Video streams without it; the keep-alive alone is enough.
 
 ### Stick packet, 21-byte "GL" layout (pyDroneWire, matches RC-Swamp's GL variant)
 

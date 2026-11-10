@@ -43,9 +43,14 @@ ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay rtsp://192.168.1.1:
 
 ## Stack
 
-- SwiftUI, Apple Network framework for the UDP keep-alive
-- MobileVLCKit via CocoaPods for RTSP (AVPlayer cannot play RTSP)
+- SwiftUI, Apple Network framework for the UDP keep-alive and the RTSP/RTP client
+- Own RTSP client plus an RFC 2435 RTP/JPEG reassembler (`App/RTPJPEG.swift`), decoded with ImageIO. No third-party media library: MobileVLCKit negotiated the session fine but never decoded a frame from this drone, and the drone refuses RTSP over TCP (461), so the stream is UDP only.
 - XcodeGen project generation, GitHub Actions macOS build, unsigned IPA, Sideloadly
+
+## Status
+
+- v0.1 to v0.3: pipeline proven, drone type confirmed (RTSP, 192.168.1.1), raw video packets received by the probe.
+- v0.4: native viewer. First build that should show a picture.
 
 ## Next
 

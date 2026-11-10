@@ -1,51 +1,94 @@
 import Foundation
 import Network
+import UIKit
+import ImageIO
 
-/// Minimal RTSP client used as a diagnostic, independent of VLC.
+/// Native RTSP/RTP-JPEG viewer for the drone, no third-party media library.
 ///
-/// It performs OPTIONS, DESCRIBE, SETUP and PLAY against rtsp://host:7070/webcam,
-/// shows every response on screen, and counts the RTP packets that arrive either
-/// on its own UDP port (default) or interleaved on the RTSP TCP socket.
-/// It sends nothing to the drone except RTSP text.
-final class RTSPProbe: ObservableObject {
-    @Published var log: [String] = []
+/// Runs OPTIONS, DESCRIBE, SETUP and PLAY against rtsp://host:7070/webcam, receives
+/// RTP on its own UDP port, reassembles each JPEG frame with `RTPJPEGAssembler`,
+/// decodes it with ImageIO and publishes it as a UIImage. Sends nothing to the drone
+/// except RTSP text. The drone answers 461 to TCP interleaving, so UDP only.
+final class RTSPClient: ObservableObject {
+    @Published var status = "idle"
+    @Published var running = false
+    @Published var frame: UIImage?
+    @Published var frameSize = ""
+    @Published var fps = 0.0
     @Published var rtpPackets = 0
     @Published var rtpBytes = 0
+    @Published var framesDecoded = 0
+    @Published var framesDropped = 0
+    @Published var decodeFailures = 0
     @Published var rtpInfo = ""
-    @Published var running = false
+    @Published var log: [String] = []
 
-    private let queue = DispatchQueue(label: "gptkun.rtspprobe")
+    private let queue = DispatchQueue(label: "gptkun.rtsp")
+    private let decodeQueue = DispatchQueue(label: "gptkun.decode", qos: .userInteractive)
+    private let assembler = RTPJPEGAssembler()
     private var tcp: NWConnection?
     private var listener: NWListener?
     private var udpConns: [NWConnection] = []
     private var buffer = Data()
     private var cseq = 0
     private var session: String?
-    private var useTCP = false
+    private var host = ""
     private var url = ""
     private var contentBase = ""
     private var keepAlive: DispatchSourceTimer?
+    private var watchdog: DispatchSourceTimer?
     private var pendingHandler: ((Int, [String: String], String) -> Void)?
+    private var lastPacketAt = Date.distantPast
+    private var playedAt = Date.distantPast
+    private var decodeBusy = false
+    private var fpsWindowStart = Date()
+    private var fpsWindowCount = 0
+    private var packetCount = 0
+    private var byteCount = 0
     private let clientPort: UInt16 = 50000
 
     // MARK: - Public
 
-    func start(host: String, overTCP: Bool) {
+    func start(host: String) {
         stop()
-        useTCP = overTCP
+        self.host = host
         url = "rtsp://\(host):7070/webcam"
         contentBase = url
         DispatchQueue.main.async {
             self.log = []
             self.rtpPackets = 0
             self.rtpBytes = 0
+            self.framesDecoded = 0
+            self.framesDropped = 0
+            self.decodeFailures = 0
             self.rtpInfo = ""
+            self.fps = 0
             self.running = true
+            self.status = "connecting"
         }
-        emit("probe start \(overTCP ? "TCP interleaved" : "UDP port \(clientPort)")")
+        packetCount = 0
+        byteCount = 0
+        lastPacketAt = .distantPast
+        playedAt = .distantPast
+        emit("start, RTP on UDP \(clientPort)")
+        startUDPListener()
+        openControlConnection()
+        startWatchdog()
+    }
 
-        if !overTCP { startUDPListener() }
+    func stop() {
+        keepAlive?.cancel(); keepAlive = nil
+        watchdog?.cancel(); watchdog = nil
+        teardownSession()
+        DispatchQueue.main.async {
+            self.running = false
+            self.status = "idle"
+        }
+    }
 
+    // MARK: - Session lifecycle
+
+    private func openControlConnection() {
         guard let port = NWEndpoint.Port(rawValue: 7070) else { return }
         let conn = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
         tcp = conn
@@ -58,16 +101,17 @@ final class RTSPProbe: ObservableObject {
                 self.sendOptions()
             case .failed(let e):
                 self.emit("tcp failed: \(e.localizedDescription)")
+                self.setStatus("control connection failed")
             case .waiting(let e):
                 self.emit("tcp waiting: \(e.localizedDescription)")
+                self.setStatus("waiting for drone")
             default: break
             }
         }
         conn.start(queue: queue)
     }
 
-    func stop() {
-        keepAlive?.cancel(); keepAlive = nil
+    private func teardownSession() {
         if let s = session, tcp != nil {
             send(method: "TEARDOWN", target: url, extra: ["Session": s]) { _, _, _ in }
         }
@@ -80,7 +124,33 @@ final class RTSPProbe: ObservableObject {
         buffer.removeAll()
         session = nil
         pendingHandler = nil
-        DispatchQueue.main.async { self.running = false }
+    }
+
+    /// Restart the RTSP session in place if video stops arriving.
+    private func startWatchdog() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = Date()
+            let sinceLast = now.timeIntervalSince(self.lastPacketAt)
+            let sincePlay = now.timeIntervalSince(self.playedAt)
+            let stalled = (self.lastPacketAt == .distantPast && sincePlay > 6) || (self.lastPacketAt != .distantPast && sinceLast > 4)
+            if self.playedAt != .distantPast, stalled {
+                self.emit("no video for a while, restarting session")
+                self.setStatus("restarting")
+                self.keepAlive?.cancel(); self.keepAlive = nil
+                self.teardownSession()
+                self.lastPacketAt = .distantPast
+                self.playedAt = .distantPast
+                self.queue.asyncAfter(deadline: .now() + 0.5) {
+                    self.startUDPListener()
+                    self.openControlConnection()
+                }
+            }
+        }
+        t.resume()
+        watchdog = t
     }
 
     // MARK: - RTSP sequence
@@ -88,7 +158,7 @@ final class RTSPProbe: ObservableObject {
     private func sendOptions() {
         send(method: "OPTIONS", target: url) { [weak self] code, _, _ in
             guard let self else { return }
-            guard code == 200 else { self.emit("OPTIONS failed, stopping"); return }
+            guard code == 200 else { self.emit("OPTIONS failed"); return }
             self.sendDescribe()
         }
     }
@@ -96,28 +166,23 @@ final class RTSPProbe: ObservableObject {
     private func sendDescribe() {
         send(method: "DESCRIBE", target: url, extra: ["Accept": "application/sdp"]) { [weak self] code, headers, body in
             guard let self else { return }
-            guard code == 200 else { self.emit("DESCRIBE failed, stopping"); return }
+            guard code == 200 else { self.emit("DESCRIBE failed"); return }
             if let base = headers["content-base"] ?? headers["content-location"] { self.contentBase = base }
-            for line in body.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) where !line.isEmpty {
-                self.emit("sdp \(line)")
-            }
             let control = self.videoControl(fromSDP: body)
-            self.emit("video control url: \(control)")
+            self.emit("sdp: \(body.replacingOccurrences(of: "\r\n", with: " | "))")
             self.sendSetup(control)
         }
     }
 
     private func sendSetup(_ control: String) {
-        let transport = useTCP
-            ? "RTP/AVP/TCP;unicast;interleaved=0-1"
-            : "RTP/AVP;unicast;client_port=\(clientPort)-\(clientPort + 1)"
+        let transport = "RTP/AVP;unicast;client_port=\(clientPort)-\(clientPort + 1)"
         send(method: "SETUP", target: control, extra: ["Transport": transport]) { [weak self] code, headers, _ in
             guard let self else { return }
-            guard code == 200 else { self.emit("SETUP failed (\(code)), stopping"); return }
+            guard code == 200 else { self.emit("SETUP failed (\(code))"); self.setStatus("SETUP refused \(code)"); return }
             if let s = headers["session"] {
                 self.session = String(s.split(separator: ";").first ?? Substring(s))
             }
-            self.emit("session: \(self.session ?? "none"); transport: \(headers["transport"] ?? "none")")
+            self.emit("session \(self.session ?? "none"), \(headers["transport"] ?? "")")
             self.sendPlay()
         }
     }
@@ -125,15 +190,18 @@ final class RTSPProbe: ObservableObject {
     private func sendPlay() {
         var extra = ["Range": "npt=0.000-"]
         if let s = session { extra["Session"] = s }
-        send(method: "PLAY", target: url, extra: extra) { [weak self] code, headers, _ in
+        send(method: "PLAY", target: url, extra: extra) { [weak self] code, _, _ in
             guard let self else { return }
-            guard code == 200 else { self.emit("PLAY failed (\(code)), stopping"); return }
-            self.emit("PLAY ok. RTP-Info: \(headers["rtp-info"] ?? "none"). Counting packets...")
+            guard code == 200 else { self.emit("PLAY failed (\(code))"); self.setStatus("PLAY refused \(code)"); return }
+            self.emit("PLAY ok")
+            self.playedAt = Date()
+            self.setStatus("playing, waiting for first frame")
             self.startKeepAlive()
         }
     }
 
     private func startKeepAlive() {
+        keepAlive?.cancel()
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 15, repeating: 15)
         t.setEventHandler { [weak self] in
@@ -150,17 +218,16 @@ final class RTSPProbe: ObservableObject {
                       handler: @escaping (Int, [String: String], String) -> Void) {
         guard let conn = tcp else { return }
         cseq += 1
-        var req = "\(method) \(target) RTSP/1.0\r\nCSeq: \(cseq)\r\nUser-Agent: GPTKun/0.3\r\n"
+        var req = "\(method) \(target) RTSP/1.0\r\nCSeq: \(cseq)\r\nUser-Agent: GPTKun/0.4\r\n"
         for (k, v) in extra { req += "\(k): \(v)\r\n" }
         req += "\r\n"
         pendingHandler = handler
-        emit("> \(method) \(target)")
         conn.send(content: req.data(using: .utf8), completion: .contentProcessed { [weak self] err in
             if let err { self?.emit("send error: \(err.localizedDescription)") }
         })
     }
 
-    // MARK: - TCP receive and parsing
+    // MARK: - RTSP response parsing
 
     private func receiveLoop(_ conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
@@ -183,55 +250,33 @@ final class RTSPProbe: ObservableObject {
 
     private func drainBuffer() {
         while !buffer.isEmpty {
-            if buffer[buffer.startIndex] == 0x24 { // '$' interleaved frame
-                guard buffer.count >= 4 else { return }
-                let channel = buffer[buffer.startIndex + 1]
-                let len = Int(buffer[buffer.startIndex + 2]) << 8 | Int(buffer[buffer.startIndex + 3])
-                guard buffer.count >= 4 + len else { return }
-                let payload = buffer.subdata(in: (buffer.startIndex + 4)..<(buffer.startIndex + 4 + len))
-                buffer.removeFirst(4 + len)
-                if channel == 0 { countRTP(payload) }
-                continue
-            }
-            guard let headerEnd = range(of: "\r\n\r\n", in: buffer) else {
-                if buffer.count > 65536 { buffer.removeAll(); emit("buffer overflow, cleared") }
+            guard let marker = "\r\n\r\n".data(using: .utf8), let headerEnd = buffer.range(of: marker) else {
+                if buffer.count > 65536 { buffer.removeAll() }
                 return
             }
             let headerData = buffer.subdata(in: buffer.startIndex..<headerEnd.lowerBound)
-            guard let headerText = String(data: headerData, encoding: .utf8) else {
-                buffer.removeAll(); emit("non-text data on RTSP socket, cleared"); return
-            }
+            guard let headerText = String(data: headerData, encoding: .utf8) else { buffer.removeAll(); return }
             var headers: [String: String] = [:]
             let lines = headerText.components(separatedBy: "\r\n")
             for line in lines.dropFirst() {
                 if let colon = line.firstIndex(of: ":") {
-                    let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-                    let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                    headers[key] = value
+                    headers[line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()] =
+                        line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
                 }
             }
             let bodyLen = Int(headers["content-length"] ?? "0") ?? 0
             let total = headerData.count + 4 + bodyLen
             guard buffer.count >= total else { return }
-            let bodyData = buffer.subdata(in: headerEnd.upperBound..<(headerEnd.upperBound + bodyLen))
+            let body = String(data: buffer.subdata(in: headerEnd.upperBound..<(headerEnd.upperBound + bodyLen)), encoding: .utf8) ?? ""
             buffer.removeFirst(total)
-            let body = String(data: bodyData, encoding: .utf8) ?? ""
             let statusLine = lines.first ?? ""
             let code = Int(statusLine.split(separator: " ").dropFirst().first ?? "0") ?? 0
             emit("< \(statusLine)")
-            for key in ["public", "transport", "session", "content-base", "rtp-info"] {
-                if let v = headers[key] { emit("  \(key): \(v)") }
-            }
             if let h = pendingHandler {
                 pendingHandler = nil
                 h(code, headers, body)
             }
         }
-    }
-
-    private func range(of marker: String, in data: Data) -> Range<Data.Index>? {
-        guard let m = marker.data(using: .utf8) else { return nil }
-        return data.range(of: m)
     }
 
     private func videoControl(fromSDP sdp: String) -> String {
@@ -250,7 +295,7 @@ final class RTSPProbe: ObservableObject {
         return contentBase.hasSuffix("/") ? contentBase + c : contentBase + "/" + c
     }
 
-    // MARK: - UDP RTP receive
+    // MARK: - RTP receive and decode
 
     private func startUDPListener() {
         guard let port = NWEndpoint.Port(rawValue: clientPort) else { return }
@@ -259,16 +304,11 @@ final class RTSPProbe: ObservableObject {
             params.allowLocalEndpointReuse = true
             let l = try NWListener(using: params, on: port)
             l.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready: self?.emit("udp listener ready on \(port)")
-                case .failed(let e): self?.emit("udp listener failed: \(e.localizedDescription)")
-                default: break
-                }
+                if case .failed(let e) = state { self?.emit("udp listener failed: \(e.localizedDescription)") }
             }
             l.newConnectionHandler = { [weak self] conn in
                 guard let self else { return }
                 self.udpConns.append(conn)
-                self.emit("udp traffic from \(conn.endpoint)")
                 conn.start(queue: self.queue)
                 self.udpReceive(conn)
             }
@@ -282,45 +322,78 @@ final class RTSPProbe: ObservableObject {
     private func udpReceive(_ conn: NWConnection) {
         conn.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
-            if let data, !data.isEmpty { self.countRTP(data) }
+            if let data, !data.isEmpty { self.handleRTP(data) }
             if error == nil { self.udpReceive(conn) }
         }
     }
 
-    private func countRTP(_ packet: Data) {
-        let n = rtpPackets + 1
-        var info = rtpInfo
-        if n == 1 || n % 50 == 0 {
-            info = describeRTP(packet)
+    private func handleRTP(_ packet: Data) {
+        lastPacketAt = Date()
+        packetCount += 1
+        byteCount += packet.count
+        if packetCount == 1 { emit("first RTP packet: \(describeRTP(packet))") }
+        if packetCount % 25 == 0 {
+            let p = packetCount, b = byteCount, d = assembler.dropped
+            DispatchQueue.main.async {
+                self.rtpPackets = p
+                self.rtpBytes = b
+                self.framesDropped = d
+            }
         }
-        DispatchQueue.main.async {
-            self.rtpPackets = n
-            self.rtpBytes += packet.count
-            self.rtpInfo = info
+        guard let jpeg = assembler.push(packet) else { return }
+        guard !decodeBusy else { return }       // never queue up stale frames
+        decodeBusy = true
+        decodeQueue.async { [weak self] in
+            guard let self else { return }
+            let options = [kCGImageSourceShouldCache: false] as CFDictionary
+            if let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
+               let cg = CGImageSourceCreateImageAtIndex(src, 0, options) {
+                let image = UIImage(cgImage: cg)
+                DispatchQueue.main.async {
+                    self.frame = image
+                    self.framesDecoded += 1
+                    self.frameSize = "\(cg.width)x\(cg.height)"
+                    self.status = "live"
+                    self.fpsWindowCount += 1
+                    let elapsed = Date().timeIntervalSince(self.fpsWindowStart)
+                    if elapsed >= 1 {
+                        self.fps = Double(self.fpsWindowCount) / elapsed
+                        self.fpsWindowCount = 0
+                        self.fpsWindowStart = Date()
+                    }
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.decodeFailures += 1
+                    if self.decodeFailures == 1 {
+                        let head = jpeg.prefix(24).map { String(format: "%02X", $0) }.joined(separator: " ")
+                        self.log.append("decode failed, jpeg \(jpeg.count) B, head \(head)")
+                    }
+                }
+            }
+            self.queue.async { self.decodeBusy = false }
         }
     }
 
     private func describeRTP(_ p: Data) -> String {
-        guard p.count >= 12 else { return "short packet \(p.count) B" }
+        guard p.count >= 20 else { return "short packet \(p.count) B" }
         let b = [UInt8](p)
-        let version = b[0] >> 6
-        let marker = (b[1] & 0x80) != 0
         let pt = b[1] & 0x7f
-        let seq = Int(b[2]) << 8 | Int(b[3])
-        var s = "RTP v\(version) pt \(pt) seq \(seq) marker \(marker) len \(p.count)"
-        if pt == 26, p.count >= 20 {
-            // RFC 2435 JPEG header: type-specific, 24-bit offset, type, Q, width/8, height/8
-            let offset = Int(b[13]) << 16 | Int(b[14]) << 8 | Int(b[15])
-            s += " | JPEG type \(b[16]) Q \(b[17]) \(Int(b[18]) * 8)x\(Int(b[19]) * 8) offset \(offset)"
+        var s = "pt \(pt) len \(p.count)"
+        if pt == 26 {
+            s += " | JPEG type \(b[16]) Q \(b[17]) \(Int(b[18]) * 8)x\(Int(b[19]) * 8)"
         }
-        let head = b.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
-        return s + "\n" + head
+        return s
+    }
+
+    private func setStatus(_ s: String) {
+        DispatchQueue.main.async { self.status = s }
     }
 
     private func emit(_ line: String) {
         DispatchQueue.main.async {
             self.log.append(line)
-            if self.log.count > 60 { self.log.removeFirst(self.log.count - 60) }
+            if self.log.count > 30 { self.log.removeFirst(self.log.count - 30) }
         }
     }
 }

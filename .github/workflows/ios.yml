@@ -13,12 +13,10 @@ jobs:
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
-      - name: Install CocoaPods
-        run: pod install --repo-update
       - name: Build device app unsigned
         run: |
           set -o pipefail
-          xcodebuild -workspace GPTKunCamera.xcworkspace -scheme GPTKunCamera -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+          xcodebuild -project GPTKunCamera.xcodeproj -scheme GPTKunCamera -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
       - name: Package IPA
         run: |
           mkdir -p output/Payload
