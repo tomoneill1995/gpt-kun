@@ -36,6 +36,11 @@ final class DroneLink: ObservableObject {
     // Stick offsets from centre, in frame units (-127...127). Only touched on `queue`.
     private var trimRoll = 0, trimPitch = 0
     private var nudgeRoll = 0, nudgePitch = 0
+    // Offsets are applied only while this is true (set by FlightController in hover).
+    // Handshake, takeoff, landing and calibration always see exactly centred sticks.
+    private var offsetsEnabled = false
+    private var frameCounter = 0
+    @Published var currentSticks = "roll 80 pitch 80 thr 80 yaw 80 cmd 00"
 
     // MARK: - Keep-alive
 
@@ -100,7 +105,7 @@ final class DroneLink: ObservableObject {
 
     func stopControlFrames() {
         controlTimer?.cancel(); controlTimer = nil
-        queue.async { self.command = Self.cmdNone; self.nudgeRoll = 0; self.nudgePitch = 0 }
+        queue.async { self.command = Self.cmdNone; self.nudgeRoll = 0; self.nudgePitch = 0; self.offsetsEnabled = false }
         DispatchQueue.main.async { self.controlRunning = false }
     }
 
@@ -120,15 +125,25 @@ final class DroneLink: ObservableObject {
         queue.async { self.nudgeRoll = roll; self.nudgePitch = pitch }
     }
 
+    /// Allow trim and nudge to move the sticks. Off outside the hover phase.
+    func setOffsetsEnabled(_ on: Bool) {
+        queue.async { self.offsetsEnabled = on }
+    }
+
     /// pyDroneWire's 21-byte GL frame: 03 66 14, roll, pitch, throttle, yaw, cmd, 0x02,
     /// ten zero bytes, checksum (XOR of bytes 3...18), 0x99. Throttle and yaw stay centred.
     private func buildFrame(command: UInt8) -> Data {
         func stick(_ offset: Int) -> UInt8 { UInt8(max(1, min(255, 0x80 + offset))) }
-        let roll = stick(trimRoll + nudgeRoll)
-        let pitch = stick(trimPitch + nudgePitch)
+        let roll = offsetsEnabled ? stick(trimRoll + nudgeRoll) : 0x80
+        let pitch = offsetsEnabled ? stick(trimPitch + nudgePitch) : 0x80
         let throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
         let flags2: UInt8 = 0x02
         let checksum = roll ^ pitch ^ throttle ^ yaw ^ command ^ flags2
+        frameCounter += 1
+        if frameCounter % 5 == 0 {
+            let text = String(format: "roll %02X pitch %02X thr %02X yaw %02X cmd %02X", roll, pitch, throttle, yaw, command)
+            DispatchQueue.main.async { self.currentSticks = text }
+        }
         return Data([0x03, 0x66, 0x14,
                      roll, pitch, throttle, yaw,
                      command, flags2,

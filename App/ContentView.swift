@@ -67,7 +67,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 007 - Calibrate, trim, nudge")
+                Text("Experiment 008 - Centred handshake")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -180,6 +180,17 @@ struct ContentView: View {
                 // MARK: Pre-flight
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Pre-flight").font(.title3.bold())
+
+                    Toggle("Controller handshake (centred frames at 20 Hz)", isOn: Binding(
+                        get: { link.controlRunning },
+                        set: { on in on ? link.startControlFrames() : link.stopControlFrames() }
+                    ))
+                    .font(.callout)
+                    .disabled(flight.phase != .idle || !link.isUp)
+                    Text("Lights should go from flashing to solid within a second. Sticks are forced to exact centre here, during takeoff and landing, and for calibration; trim and nudge only act in the hover.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("sending: \(link.currentSticks)")
+                        .font(.footnote.monospaced())
 
                     Text("Gyro calibration. Drone flat and still on the floor. The lights should flash a pattern for a second or two. Two candidate commands; try A first, with props off the first time.")
                         .font(.caption).foregroundStyle(.secondary)

@@ -59,6 +59,7 @@ final class FlightController: ObservableObject {
         }
         after(2.0, gen) {
             link.setCommand(DroneLink.cmdNone)
+            link.setOffsetsEnabled(true)        // trim and nudge act only from here
             self.enter(.hover, for: self.hoverSeconds)
         }
         after(2.0 + hoverSeconds, gen) {
@@ -80,6 +81,7 @@ final class FlightController: ObservableObject {
         let gen = generation
         note("EMERGENCY STOP")
         if !link.controlRunning { link.startControlFrames() }
+        link.setOffsetsEnabled(false)
         link.setCommand(DroneLink.cmdEmergencyStop)
         enter(.emergency, for: 1.5)
         after(1.5, gen) {
@@ -129,6 +131,7 @@ final class FlightController: ObservableObject {
         let gen = generation
         note("landing: \(reason)")
         if !link.controlRunning { link.startControlFrames() }
+        link.setOffsetsEnabled(false)           // centred sticks for the land command
         link.setCommand(DroneLink.cmdTakeoffLand)
         enter(.landing, for: 1.0)
         after(1.0, gen) {
