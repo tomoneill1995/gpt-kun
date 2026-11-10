@@ -53,9 +53,21 @@ ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay rtsp://192.168.1.1:
 - v0.4: native viewer, first picture (garbled: wrong chroma sampling).
 - **v0.5: clean live video, 240x320 at about 20 fps, confirmed on FLOW-UFO-985264 on 2026-11-11.** Camera phase complete.
 
-## Next phase: wings
+- v0.6: first flight behaviour. One-key takeoff, hover N seconds, one-key land, behind an arm switch, with emergency stop, land-now, link watchdog and background auto-land. Sticks stay centred; no joystick input.
 
-Manual flight with a local safety layer, in this order: a watchdog that lands or cuts motors when the link or the UI goes quiet, an emergency stop that works independently of everything else, then on-screen sticks, then takeoff and land. The 21-byte control frame is confirmed by the drone (lights go solid on the neutral frame). Only after that does GPT-kun get a restricted set of actions.
+## Flight test procedure (v0.6)
+
+The drone's one-key takeoff climbs to a height its own flight controller picks, about a metre, and holds it. There is no altitude telemetry, so the app cannot ask for a specific height yet.
+
+**Dry run first, propellers OFF.** Connect video, flip ARM, tap "Take off, hover, land" with 3 s hover. Expected: the lights go solid during the handshake second, the motors spin up on the takeoff command, keep spinning through the hover, and stop within a second or two after the land command. Then run it again and press EMERGENCY STOP during the hover: motors must stop at once. Only when both behave do the props go on.
+
+**First real flight.** Props on, drone on a flat floor with some texture (not a plain white tile; the optical flow needs features), 2 m clear in every direction, nothing above it, battery full. Stand back, thumb over EMERGENCY STOP. Hover 3 s the first time. Expect a brisk climb to roughly a metre, a wobble, a hold, then a descent and motor stop.
+
+**Known risk.** The takeoff and land commands are the same bit. The app holds it for 20 consecutive frames, so a single lost packet does not matter, but if the drone somehow misses the whole takeoff burst, the later "land" burst would take it off instead. Watch it, and use EMERGENCY STOP if anything looks wrong. Emergency stop cuts the motors wherever the drone is; from a metre onto carpet a toy of this weight is fine.
+
+## After that
+
+Manual sticks with a rate limit (also the way to find out which way the throttle axis really goes on this unit, one source says it is inverted), then a lower hover, then a restricted action set for GPT-kun.
 
 ## Next
 

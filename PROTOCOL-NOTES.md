@@ -29,6 +29,9 @@ Sources: pyDroneWire (`drone_controller.py`), [Juliii-p/e88-drone-pc-control](ht
   - Video: standard RTP/JPEG (RFC 2435), payload type 26, **JPEG type 65** (4:2:2 with restart markers), **Q 255** (quantisation tables in-band), **240x320** portrait, about 27 packets/s and 107 KB/s observed. Frames are roughly 9.4 KB.
   - MobileVLCKit 3.7.5 reached "playing" but decoded nothing over UDP, with no error logged, while a plain Swift RTSP client on the same phone received the packets. Cause not identified; VLC was dropped in v0.4 in favour of a native RFC 2435 reassembler and ImageIO decode.
   - Sending pyDroneWire's centred 21-byte idle frame at 20 Hz turns the drone's lights from flashing to solid. That is the "controller connected" state, and it confirms the GL packet layout and checksum. Video streams without it; the keep-alive alone is enough.
+  - Camera is mounted sideways: 270 degrees in SwiftUI terms (90 degrees counter-clockwise) levels it, as OpenIPC documented for the K200.
+  - The byte at index 8 that pyDroneWire calls "speed, always 0x02" sits where RC-Swamp's GL FLAGS2 has 0x02 = altitude hold. The app keeps sending 0x02.
+  - v0.6 uses two command bits in byte 7: 0x01 one-key takeoff/land (held 1 s = 20 frames) and 0x02 emergency stop (held 1.5 s). Results of the props-off dry run go here.
 
 ### Stick packet, 21-byte "GL" layout (pyDroneWire, matches RC-Swamp's GL variant)
 

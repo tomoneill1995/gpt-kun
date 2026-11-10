@@ -1,51 +1,36 @@
 import Foundation
 import Network
 
-/// UDP link to the drone's control/heartbeat port.
+/// UDP link to the drone's control port (192.168.1.1:7099).
 ///
-/// KY UFO / FLOW-UFO drones at 192.168.1.1 only serve their RTSP stream while a client
-/// is sending a keep-alive of bytes `01 01` to UDP 7099 once per second (pyDroneWire,
-/// e88-drone-pc-control, OpenIPC decoder all agree). This class sends ONLY that
-/// keep-alive. It never sends a stick, takeoff, land or flip packet; the flight packet
-/// format is deliberately not in this app.
+/// Two kinds of traffic go out on it:
+/// - the 2-byte keep-alive `01 01` once a second, which the drone needs before it
+///   serves video at all;
+/// - optionally, the 21-byte GL control frame at 20 Hz, which is what the stock app
+///   sends while it is the drone's controller. Sticks are held centred in this build;
+///   only the command byte changes, and only `FlightController` changes it.
 final class DroneLink: ObservableObject {
     @Published var state = "idle"
     @Published var lastReplyHex = ""
     @Published var repliesSeen = 0
-    @Published var idleSent = 0
+    @Published var lastReplyAt: Date = .distantPast
+    @Published var framesSent = 0
+    @Published var controlRunning = false
+
+    /// Command bits in byte 7 of the GL frame. pyDroneWire, turbodrone and RC-Swamp
+    /// agree on the two this app uses.
+    static let cmdNone: UInt8 = 0x00
+    static let cmdTakeoffLand: UInt8 = 0x01   // one-key takeoff when landed, land when flying
+    static let cmdEmergencyStop: UInt8 = 0x02 // cuts the motors immediately
 
     private var connection: NWConnection?
     private var timer: DispatchSourceTimer?
-    private var idleTimer: DispatchSourceTimer?
+    private var controlTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "gptkun.dronelink")
     private let heartbeat = Data([0x01, 0x01])
+    private var command: UInt8 = 0x00          // only touched on `queue`
 
-    /// pyDroneWire's 21-byte GL control frame with every stick centred (0x80),
-    /// command byte 0x00 and its constant speed byte 0x02. Checksum is the XOR of
-    /// bytes 3...18, which is 0x02 here. It carries no takeoff, land, flip or
-    /// calibrate bit. Only used by the diagnostic "last resort" toggle.
-    private let idleFrame = Data([0x03, 0x66, 0x14,
-                                  0x80, 0x80, 0x80, 0x80,
-                                  0x00, 0x02,
-                                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                  0x02, 0x99])
-
-    func startIdleFrames() {
-        stopIdleFrames()
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: .milliseconds(50))
-        t.setEventHandler { [weak self] in
-            guard let self, let c = self.connection else { return }
-            c.send(content: self.idleFrame, completion: .contentProcessed { _ in })
-            DispatchQueue.main.async { self.idleSent += 1 }
-        }
-        t.resume()
-        idleTimer = t
-    }
-
-    func stopIdleFrames() {
-        idleTimer?.cancel(); idleTimer = nil
-    }
+    // MARK: - Keep-alive
 
     func start(host: String, port: UInt16 = 7099) {
         stop()
@@ -80,14 +65,59 @@ final class DroneLink: ObservableObject {
     }
 
     func stop() {
-        stopIdleFrames()
+        stopControlFrames()
         timer?.cancel(); timer = nil
         connection?.cancel(); connection = nil
         DispatchQueue.main.async { self.state = "idle" }
     }
 
-    /// The drone answers roughly once a second with a few bytes of telemetry.
-    /// Seeing any reply proves we are talking to a cooingdv-family drone.
+    var isUp: Bool { connection != nil }
+
+    // MARK: - Control frames
+
+    /// Start the 20 Hz control stream with sticks centred and no command.
+    func startControlFrames() {
+        stopControlFrames()
+        queue.async { self.command = Self.cmdNone }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(50))
+        t.setEventHandler { [weak self] in
+            guard let self, let c = self.connection else { return }
+            c.send(content: self.buildFrame(command: self.command), completion: .contentProcessed { _ in })
+            DispatchQueue.main.async { self.framesSent += 1 }
+        }
+        t.resume()
+        controlTimer = t
+        DispatchQueue.main.async { self.controlRunning = true }
+    }
+
+    func stopControlFrames() {
+        controlTimer?.cancel(); controlTimer = nil
+        queue.async { self.command = Self.cmdNone }
+        DispatchQueue.main.async { self.controlRunning = false }
+    }
+
+    /// Set the command bits carried by every following frame until changed again.
+    func setCommand(_ cmd: UInt8) {
+        queue.async { self.command = cmd }
+    }
+
+    /// pyDroneWire's 21-byte GL frame: 03 66 14, roll, pitch, throttle, yaw, cmd, 0x02,
+    /// ten zero bytes, checksum (XOR of bytes 3...18), 0x99. Sticks are fixed at centre.
+    private func buildFrame(command: UInt8) -> Data {
+        let roll: UInt8 = 0x80, pitch: UInt8 = 0x80, throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
+        let flags2: UInt8 = 0x02
+        let checksum = roll ^ pitch ^ throttle ^ yaw ^ command ^ flags2
+        return Data([0x03, 0x66, 0x14,
+                     roll, pitch, throttle, yaw,
+                     command, flags2,
+                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                     checksum, 0x99])
+    }
+
+    // MARK: - Replies
+
+    /// The drone answers several times a second with 11 bytes of telemetry.
     private func receiveLoop(_ conn: NWConnection) {
         conn.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
@@ -96,6 +126,7 @@ final class DroneLink: ObservableObject {
                 DispatchQueue.main.async {
                     self.lastReplyHex = hex
                     self.repliesSeen += 1
+                    self.lastReplyAt = Date()
                 }
             }
             if error == nil, self.connection === conn { self.receiveLoop(conn) }
@@ -104,8 +135,7 @@ final class DroneLink: ObservableObject {
 }
 
 /// One-shot TCP connect test. The RTSP-type drones accept a TCP connection on 7070;
-/// the custom-UDP (flowufo) type refuses it. This is the cheapest way to tell them
-/// apart from an iPhone with no PC available.
+/// the custom-UDP (flowufo) type refuses it.
 final class PortProbe: ObservableObject {
     @Published var result = "not run"
     private var connection: NWConnection?
@@ -129,19 +159,18 @@ final class PortProbe: ObservableObject {
         conn.stateUpdateHandler = { newState in
             switch newState {
             case .ready:
-                finish("TCP \(port) OPEN: RTSP-type drone, this app should work")
+                finish("TCP \(port) OPEN: RTSP-type drone")
             case .failed(let err):
-                finish("TCP \(port) closed (\(err.localizedDescription)): not the RTSP type")
+                finish("TCP \(port) closed (\(err.localizedDescription))")
             case .waiting(let err):
-                // A refused connection lands here and would retry forever; treat as closed.
-                finish("TCP \(port) refused (\(err.localizedDescription)): not the RTSP type")
+                finish("TCP \(port) refused (\(err.localizedDescription))")
             default:
                 break
             }
         }
         conn.start(queue: queue)
         queue.asyncAfter(deadline: .now() + timeout) {
-            finish("TCP \(port): no answer in \(Int(timeout)) s. Wrong IP, or not the RTSP type")
+            finish("TCP \(port): no answer in \(Int(timeout)) s")
         }
     }
 }

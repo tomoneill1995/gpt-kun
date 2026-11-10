@@ -1,33 +1,38 @@
 import SwiftUI
 
-// VIDEO ONLY: no takeoff, landing, flip or joystick input exists in this app.
-// Control-port traffic is the 2-byte keep-alive and, only if the user switches it on,
-// the centred idle frame used to test the controller handshake.
+// Camera plus the first flight behaviour (one-key takeoff, hover, one-key land)
+// behind a two-step arm switch, with emergency stop, land-now and a link watchdog.
+// Sticks are always centred in this build; there is no joystick input yet.
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var stream = RTSPClient()
     @StateObject private var link = DroneLink()
     @StateObject private var probe = PortProbe()
+    @StateObject private var flight = FlightController()
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
     @AppStorage("sendHeartbeat") private var sendHeartbeat = true
-    @AppStorage("rotation") private var rotation = 0.0
-    @State private var idleFrames = false
+    @AppStorage("rotationV2") private var rotation = 270.0
     @State private var showLog = false
+    @State private var showFlightLog = true
 
     private var host: String { droneHost.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var hostIsValid: Bool {
         !host.isEmpty && host.range(of: "^[A-Za-z0-9.-]+$", options: .regularExpression) != nil
     }
+    private var linkFresh: Bool { Date().timeIntervalSince(link.lastReplyAt) < 2 }
 
     private func connect() {
         if sendHeartbeat { link.start(host: host) }
         stream.start(host: host)
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     private func disconnect() {
+        if flight.inFlight { flight.landNow() }
         stream.stop()
-        idleFrames = false
         link.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
     var body: some View {
@@ -35,7 +40,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 005 - Native viewer, 4:2:0 fix")
+                Text("Experiment 006 - First hover")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -56,12 +61,75 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
 
-                HStack {
-                    Text("\(stream.status)  \(stream.frameSize)  \(String(format: "%.1f", stream.fps)) fps")
-                    Spacer()
-                }
-                .font(.footnote.monospaced())
+                Text("\(stream.status)  \(stream.frameSize)  \(String(format: "%.1f", stream.fps)) fps")
+                    .font(.footnote.monospaced())
 
+                // MARK: Flight
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Flight: \(flight.phase.rawValue)\(flight.countdown > 0 ? " \(flight.countdown) s" : "")")
+                        .font(.title3.bold())
+
+                    HStack(spacing: 12) {
+                        Button {
+                            flight.emergencyStop()
+                        } label: {
+                            Text("EMERGENCY STOP")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 56)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .disabled(!link.isUp)
+
+                        Button {
+                            flight.landNow()
+                        } label: {
+                            Text("LAND NOW")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 56)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .disabled(!flight.inFlight)
+                    }
+
+                    Toggle("ARM: props on, 2 m clear all round, phone in hand", isOn: $flight.armed)
+                        .font(.callout)
+                        .tint(.red)
+                        .disabled(flight.inFlight || !linkFresh)
+
+                    HStack {
+                        Text("Hover \(Int(flight.hoverSeconds)) s")
+                        Slider(value: $flight.hoverSeconds, in: 2...15, step: 1)
+                            .disabled(flight.inFlight)
+                    }
+                    .font(.callout)
+
+                    Button {
+                        flight.startHoverTest()
+                    } label: {
+                        Text("Take off, hover, land")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!flight.armed || flight.inFlight || !linkFresh)
+
+                    Text("One-key takeoff climbs to the height the drone chooses (about 1 m), holds with sticks centred, then one-key land. If the drone's replies stop for 1.5 s or the app leaves the foreground, it lands by itself. Emergency stop cuts the motors and the drone drops.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    DisclosureGroup("Flight log", isExpanded: $showFlightLog) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(flight.log.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.system(size: 10, design: .monospaced))
+                            }
+                        }
+                    }
+                    .font(.callout)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
+
+                // MARK: Connection
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Drone address").font(.headline)
                     TextField("192.168.1.1", text: $droneHost)
@@ -72,11 +140,17 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 12) {
-                    Button("Probe drone type") { probe.check(host: host) }
+                    Button("Connect video") { connect() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!hostIsValid || stream.running)
+                    Button("Disconnect") { disconnect() }
+                        .buttonStyle(.bordered)
+                        .disabled(!stream.running)
+                    Button("Probe") { probe.check(host: host) }
                         .buttonStyle(.bordered)
                         .disabled(!hostIsValid)
-                    Text(probe.result).font(.footnote.monospaced())
                 }
+                Text(probe.result).font(.footnote.monospaced())
 
                 Toggle("Send 1 s keep-alive to UDP 7099", isOn: $sendHeartbeat)
                     .font(.callout)
@@ -89,19 +163,10 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
 
-                HStack(spacing: 12) {
-                    Button("Connect video") { connect() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!hostIsValid || stream.running)
-                    Button("Disconnect") { disconnect() }
-                        .buttonStyle(.bordered)
-                        .disabled(!stream.running)
-                }
-
                 VStack(alignment: .leading, spacing: 4) {
                     Text("rtp: \(stream.rtpPackets) pkts, \(stream.rtpBytes) B")
                     Text("frames: \(stream.framesDecoded) shown, \(stream.framesDropped) dropped, \(stream.decodeFailures) failed")
-                    Text("link: \(link.state)")
+                    Text("link: \(link.state)  control frames: \(link.controlRunning ? "ON" : "off") (\(link.framesSent) sent)")
                     Text("drone replies: \(link.repliesSeen)  last: \(link.lastReplyHex.isEmpty ? "-" : link.lastReplyHex)")
                 }
                 .font(.footnote.monospaced())
@@ -116,27 +181,14 @@ struct ContentView: View {
                 .font(.callout)
 
                 Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Controller handshake test (props OFF)").font(.headline)
-                    Toggle("Send neutral stick frame at 20 Hz", isOn: $idleFrames)
-                        .font(.callout)
-                        .onChange(of: idleFrames) { on in
-                            if on {
-                                if link.state == "idle" { link.start(host: host) }
-                                link.startIdleFrames()
-                            } else {
-                                link.stopIdleFrames()
-                            }
-                        }
-                    Text("pyDroneWire's 21-byte frame with all sticks centred and no command bit. On this drone it turns the lights from flashing to solid, meaning the drone accepts us as its controller. It does not arm, take off or spin motors; keep propellers off anyway. Sent: \(link.idleSent)")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-
-                Divider()
-                Label("No takeoff, landing, flip or joystick input exists in this build.", systemImage: "shield.checkered")
+                Label("No joystick input exists in this build. Sticks are always centred; the only commands are one-key takeoff/land and emergency stop.", systemImage: "shield.checkered")
                     .font(.callout)
             }
             .padding()
+        }
+        .onAppear { flight.link = link }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { flight.appWentToBackground() }
         }
         .onDisappear { disconnect() }
     }
