@@ -23,6 +23,7 @@ Sources: pyDroneWire (`drone_controller.py`), [Juliii-p/e88-drone-pc-control](ht
 - Video: `rtsp://192.168.1.1:7070/webcam`, RTP over UDP, MJPEG. Front and bottom camera share the URL; switching is done on the control port. After a switch, reopen the RTSP session (pyDroneWire waits 1.5 s and retries up to 5 times). Camera can be mounted sideways; some units need 90 or 270 degree rotation.
 - Camera switch: single datagram `06 01` (front) or `06 02` (bottom) to 7099.
 - Drone telemetry: a few bytes about once per second. First byte is a module id (83 seen on Juliii-p's unit). None of the sources parse it further.
+- **Our drone (FLOW-UFO-985264, observed 2026-11-10):** TCP 7070 open, replies to the `01 01` keep-alive with 11 bytes `65 02 31 46 31 46 00 00 00 00 00`. First byte 0x65 = 101 falls in RC-Swamp's GL range (90-101), so the 21-byte GL stick packet below is the one to use later, not the 9-byte Legacy one. Reply rate looked higher than 1/s (993 replies within one session). VLC reached the playing state on the first build but the picture stayed black; under investigation with v0.2 diagnostics.
 
 ### Stick packet, 21-byte "GL" layout (pyDroneWire, matches RC-Swamp's GL variant)
 
