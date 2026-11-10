@@ -65,7 +65,11 @@ The drone's one-key takeoff climbs to a height its own flight controller picks, 
 
 **Known risk.** The takeoff and land commands are the same bit. The app holds it for 20 consecutive frames, so a single lost packet does not matter, but if the drone somehow misses the whole takeoff burst, the later "land" burst would take it off instead. Watch it, and use EMERGENCY STOP if anything looks wrong. Emergency stop cuts the motors wherever the drone is; from a metre onto carpet a toy of this weight is fine.
 
-**First flight result (2026-11-11, v0.6):** took off to roughly a metre, then went forward and strongly left into a fridge. Emergency stop worked; the drone was fine. A consistent push in one direction is a lean (gyro or trim), not optical-flow wander.
+**First flight result (2026-11-11, v0.6):** took off to roughly a metre, then went forward and strongly left into a fridge. Emergency stop worked; the drone was fine. Likely cause: one folding arm was not fully clicked out, which tilts that motor and gives a steady push in one direction. Afterwards the drone sat with lights flashing and ignored handshake, calibrate and takeoff; frames were identical to the ones that flew, so that is the drone's post-crash or low-battery lockout. Battery went on charge.
+
+**Pre-flight checklist:** all four arms clicked fully open, props tight, battery charged, drone flat and still at power-on, handshake switch gives solid lights before arming.
+
+**Open questions for the next session:** which calibrate bit (0x80 or 0x04) the drone honours; whether the telemetry bytes change when the drone accepts the controller (then the app can wait for that instead of a 1 s timer); which way pitch and throttle really go.
 
 ## v0.7: calibrate, trim, nudge
 
