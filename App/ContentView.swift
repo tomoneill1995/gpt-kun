@@ -13,8 +13,34 @@ struct ContentView: View {
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
     @AppStorage("sendHeartbeat") private var sendHeartbeat = true
     @AppStorage("rotationV2") private var rotation = 270.0
+    @AppStorage("trimRoll") private var trimRoll = 0
+    @AppStorage("trimPitch") private var trimPitch = 0
+    @AppStorage("invertPitch") private var invertPitch = false
+    @AppStorage("nudgeAmount") private var nudgeAmount = 20.0
     @State private var showLog = false
     @State private var showFlightLog = true
+
+    private let trimStep = 3
+
+    private func pushTrim() {
+        link.setTrim(roll: trimRoll, pitch: invertPitch ? -trimPitch : trimPitch)
+    }
+
+    /// Roll and pitch offsets for a nudge direction. Positive pitch = forward unless inverted.
+    private func nudge(roll: Int, pitch: Int) {
+        let amount = Int(nudgeAmount)
+        link.setNudge(roll: roll * amount, pitch: (invertPitch ? -pitch : pitch) * amount)
+    }
+
+    private func nudgeButton(_ label: String, roll: Int, pitch: Int) -> some View {
+        Text(label)
+            .font(.title2)
+            .frame(width: 64, height: 56)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(link.controlRunning ? 0.35 : 0.12)))
+            .onLongPressGesture(minimumDuration: 0, maximumDistance: 40, pressing: { pressing in
+                if pressing { nudge(roll: roll, pitch: pitch) } else { nudge(roll: 0, pitch: 0) }
+            }, perform: {})
+    }
 
     private var host: String { droneHost.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var hostIsValid: Bool {
@@ -24,6 +50,7 @@ struct ContentView: View {
 
     private func connect() {
         if sendHeartbeat { link.start(host: host) }
+        pushTrim()
         stream.start(host: host)
         UIApplication.shared.isIdleTimerDisabled = true
     }
@@ -40,7 +67,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 006 - First hover")
+                Text("Experiment 007 - Calibrate, trim, nudge")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -114,7 +141,28 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!flight.armed || flight.inFlight || !linkFresh)
 
-                    Text("One-key takeoff climbs to the height the drone chooses (about 1 m), holds with sticks centred, then one-key land. If the drone's replies stop for 1.5 s or the app leaves the foreground, it lands by itself. Emergency stop cuts the motors and the drone drops.")
+                    Text("One-key takeoff climbs to the height the drone chooses (about 1 m), holds, then one-key land. If the drone's replies stop for 1.5 s or the app leaves the foreground, it lands by itself. Emergency stop cuts the motors and the drone drops.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    // Nudge pad: momentary roll/pitch while held, any time control frames run.
+                    Text("Nudge (hold)").font(.headline)
+                    HStack(spacing: 24) {
+                        VStack(spacing: 6) {
+                            nudgeButton("▲", roll: 0, pitch: 1)
+                            HStack(spacing: 6) {
+                                nudgeButton("◀", roll: -1, pitch: 0)
+                                nudgeButton("▼", roll: 0, pitch: -1)
+                                nudgeButton("▶", roll: 1, pitch: 0)
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("strength \(Int(nudgeAmount))").font(.callout)
+                            Slider(value: $nudgeAmount, in: 10...50, step: 5)
+                            Toggle("invert pitch", isOn: $invertPitch).font(.callout)
+                                .onChange(of: invertPitch) { _ in pushTrim() }
+                        }
+                    }
+                    Text("Forward is the direction the camera looks. If ▲ sends it backwards, switch invert pitch.")
                         .font(.caption).foregroundStyle(.secondary)
 
                     DisclosureGroup("Flight log", isExpanded: $showFlightLog) {
@@ -125,6 +173,42 @@ struct ContentView: View {
                         }
                     }
                     .font(.callout)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
+
+                // MARK: Pre-flight
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Pre-flight").font(.title3.bold())
+
+                    Text("Gyro calibration. Drone flat and still on the floor. The lights should flash a pattern for a second or two. Two candidate commands; try A first, with props off the first time.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Button("Calibrate A (0x80)") { flight.calibrate(bit: DroneLink.cmdCalibrateA) }
+                            .buttonStyle(.bordered)
+                            .disabled(flight.phase != .idle || !linkFresh)
+                        Button("Calibrate B (0x04)") { flight.calibrate(bit: DroneLink.cmdCalibrateB) }
+                            .buttonStyle(.bordered)
+                            .disabled(flight.phase != .idle || !linkFresh)
+                    }
+
+                    Text("Trim: tap the direction it drifted. Each tap adds \(trimStep) to the opposite stick, applied on every flight.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("drifts fwd") { trimPitch -= trimStep; pushTrim() }
+                        Button("drifts back") { trimPitch += trimStep; pushTrim() }
+                        Button("drifts left") { trimRoll += trimStep; pushTrim() }
+                        Button("drifts right") { trimRoll -= trimStep; pushTrim() }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                    HStack {
+                        Text("trim roll \(trimRoll > 0 ? "+" : "")\(trimRoll)  pitch \(trimPitch > 0 ? "+" : "")\(trimPitch)")
+                            .font(.footnote.monospaced())
+                        Spacer()
+                        Button("reset trim") { trimRoll = 0; trimPitch = 0; pushTrim() }
+                            .font(.caption)
+                    }
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
@@ -181,12 +265,12 @@ struct ContentView: View {
                 .font(.callout)
 
                 Divider()
-                Label("No joystick input exists in this build. Sticks are always centred; the only commands are one-key takeoff/land and emergency stop.", systemImage: "shield.checkered")
+                Label("Throttle and yaw are always centred. Roll and pitch move only by the trim you set and while a nudge button is held. Commands: one-key takeoff/land, emergency stop, gyro calibrate.", systemImage: "shield.checkered")
                     .font(.callout)
             }
             .padding()
         }
-        .onAppear { flight.link = link }
+        .onAppear { flight.link = link; pushTrim() }
         .onChange(of: scenePhase) { phase in
             if phase != .active { flight.appWentToBackground() }
         }

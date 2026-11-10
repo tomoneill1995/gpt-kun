@@ -65,9 +65,20 @@ The drone's one-key takeoff climbs to a height its own flight controller picks, 
 
 **Known risk.** The takeoff and land commands are the same bit. The app holds it for 20 consecutive frames, so a single lost packet does not matter, but if the drone somehow misses the whole takeoff burst, the later "land" burst would take it off instead. Watch it, and use EMERGENCY STOP if anything looks wrong. Emergency stop cuts the motors wherever the drone is; from a metre onto carpet a toy of this weight is fine.
 
+**First flight result (2026-11-11, v0.6):** took off to roughly a metre, then went forward and strongly left into a fridge. Emergency stop worked; the drone was fine. A consistent push in one direction is a lean (gyro or trim), not optical-flow wander.
+
+## v0.7: calibrate, trim, nudge
+
+1. **Calibrate** with the drone flat on the floor, props off the first time. Button A sends 0x80 (pyDroneWire), button B sends 0x04 (turbodrone / RC-Swamp). The right one makes the lights flash a pattern for a second or two. Note which one works in PROTOCOL-NOTES.md.
+2. **Fly 3 s** in the biggest clear space available. Watch which way it drifts.
+3. **Trim**: tap the button for the direction it drifted ("drifts left" adds right roll). One tap per obvious drift, then fly again. Trim persists between launches.
+4. **Nudge pad**: hold an arrow during the hover to push the drone that way. Forward is where the camera looks. If the up arrow sends it backwards, switch "invert pitch"; one source says this drone's pitch axis is inverted in hardware.
+
+Throttle and yaw stay centred. The hover height is still the drone's own.
+
 ## After that
 
-Manual sticks with a rate limit (also the way to find out which way the throttle axis really goes on this unit, one source says it is inverted), then a lower hover, then a restricted action set for GPT-kun.
+Throttle on the nudge pad once its direction is known, a lower hover, then a restricted action set for GPT-kun.
 
 ## Next
 

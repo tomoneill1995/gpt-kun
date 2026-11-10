@@ -22,6 +22,10 @@ final class DroneLink: ObservableObject {
     static let cmdNone: UInt8 = 0x00
     static let cmdTakeoffLand: UInt8 = 0x01   // one-key takeoff when landed, land when flying
     static let cmdEmergencyStop: UInt8 = 0x02 // cuts the motors immediately
+    // Gyro calibration: sources disagree for this frame layout. pyDroneWire (same
+    // drone) uses 0x80; turbodrone and RC-Swamp list 0x04 for the GL variant.
+    static let cmdCalibrateA: UInt8 = 0x80
+    static let cmdCalibrateB: UInt8 = 0x04
 
     private var connection: NWConnection?
     private var timer: DispatchSourceTimer?
@@ -29,6 +33,9 @@ final class DroneLink: ObservableObject {
     private let queue = DispatchQueue(label: "gptkun.dronelink")
     private let heartbeat = Data([0x01, 0x01])
     private var command: UInt8 = 0x00          // only touched on `queue`
+    // Stick offsets from centre, in frame units (-127...127). Only touched on `queue`.
+    private var trimRoll = 0, trimPitch = 0
+    private var nudgeRoll = 0, nudgePitch = 0
 
     // MARK: - Keep-alive
 
@@ -93,7 +100,7 @@ final class DroneLink: ObservableObject {
 
     func stopControlFrames() {
         controlTimer?.cancel(); controlTimer = nil
-        queue.async { self.command = Self.cmdNone }
+        queue.async { self.command = Self.cmdNone; self.nudgeRoll = 0; self.nudgePitch = 0 }
         DispatchQueue.main.async { self.controlRunning = false }
     }
 
@@ -102,10 +109,24 @@ final class DroneLink: ObservableObject {
         queue.async { self.command = cmd }
     }
 
+    /// Persistent correction added to the centred sticks (positive roll = right,
+    /// positive pitch = forward, per pyDroneWire's reading of the protocol).
+    func setTrim(roll: Int, pitch: Int) {
+        queue.async { self.trimRoll = roll; self.trimPitch = pitch }
+    }
+
+    /// Momentary deflection while a nudge button is held. Zero when released.
+    func setNudge(roll: Int, pitch: Int) {
+        queue.async { self.nudgeRoll = roll; self.nudgePitch = pitch }
+    }
+
     /// pyDroneWire's 21-byte GL frame: 03 66 14, roll, pitch, throttle, yaw, cmd, 0x02,
-    /// ten zero bytes, checksum (XOR of bytes 3...18), 0x99. Sticks are fixed at centre.
+    /// ten zero bytes, checksum (XOR of bytes 3...18), 0x99. Throttle and yaw stay centred.
     private func buildFrame(command: UInt8) -> Data {
-        let roll: UInt8 = 0x80, pitch: UInt8 = 0x80, throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
+        func stick(_ offset: Int) -> UInt8 { UInt8(max(1, min(255, 0x80 + offset))) }
+        let roll = stick(trimRoll + nudgeRoll)
+        let pitch = stick(trimPitch + nudgePitch)
+        let throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
         let flags2: UInt8 = 0x02
         let checksum = roll ^ pitch ^ throttle ^ yaw ^ command ^ flags2
         return Data([0x03, 0x66, 0x14,

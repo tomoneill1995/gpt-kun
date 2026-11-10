@@ -15,7 +15,7 @@ import UIKit
 /// Sticks stay centred throughout.
 final class FlightController: ObservableObject {
     enum Phase: String {
-        case idle, handshake, takeoff, hover, landing, settling, emergency
+        case idle, handshake, takeoff, hover, landing, settling, emergency, calibrating
     }
 
     @Published var phase: Phase = .idle
@@ -85,6 +85,32 @@ final class FlightController: ObservableObject {
         after(1.5, gen) {
             link.setCommand(DroneLink.cmdNone)
             self.finish()
+        }
+    }
+
+    /// Gyro calibration. Drone must sit flat and still. Holds the bit for 2 s with
+    /// centred sticks, then stops the control frames again.
+    func calibrate(bit: UInt8) {
+        guard let link, phase == .idle, linkFresh else {
+            note("calibrate: needs idle flight state and a live link")
+            return
+        }
+        generation += 1
+        let gen = generation
+        note(String(format: "calibrate gyro, command 0x%02X", bit))
+        let wasRunning = link.controlRunning
+        if !wasRunning { link.startControlFrames() }
+        enter(.calibrating, for: 3.0)
+        after(1.0, gen) { link.setCommand(bit) }
+        after(3.0, gen) {
+            link.setCommand(DroneLink.cmdNone)
+            self.after(1.0, gen) {
+                if !wasRunning { link.stopControlFrames() }
+                self.countdownTimer?.invalidate(); self.countdownTimer = nil
+                self.countdown = 0
+                self.phase = .idle
+                self.note("calibration burst sent; lights should have flashed a pattern")
+            }
         }
     }
 
