@@ -80,6 +80,17 @@ The drone's one-key takeoff climbs to a height its own flight controller picks, 
 
 Throttle and yaw stay centred. The hover height is still the drone's own.
 
+## v0.9: optical-flow auto-hold
+
+The drone reports no position, so the app measures drift from the video: Vision's translational registration gives the shift between consecutive frames, and over a floor that is the drone's motion. A PI controller turns it into roll and pitch offsets (P leans against motion, I learns the standing lean, which is auto-trim), clamped to a max you set, applied only in the hover.
+
+1. **Bottom camera.** Tap "Bottom cam" (sends `06 02`, then reopens RTSP). Rotate the picture so "up" is the drone's front.
+2. **Hand-held check, hold OFF, props off.** Hold the drone 30 cm over a floor with some texture and move it right: the green arrow should point right. Move it forward: arrow up. Fix with the rotation picker.
+3. **First hold flight.** Gain 3, max 15, hover 10 s, biggest clear floor you have, thumb on EMERGENCY STOP. It should settle rather than drift. If it accelerates away along one axis, land and switch that axis's flip toggle; the stick direction for pitch is still unverified on this unit.
+4. **Tune.** Raise gain until it starts to twitch, then back off. The "learned lean" numbers after a good hover are what trim should be.
+
+Front camera works too but confuses turning with sideways drift, so expect worse hold.
+
 ## After that
 
 Throttle on the nudge pad once its direction is known, a lower hover, then a restricted action set for GPT-kun.

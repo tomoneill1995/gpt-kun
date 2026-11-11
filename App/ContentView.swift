@@ -10,6 +10,7 @@ struct ContentView: View {
     @StateObject private var link = DroneLink()
     @StateObject private var probe = PortProbe()
     @StateObject private var flight = FlightController()
+    @StateObject private var hold = HoldController()
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
     @AppStorage("sendHeartbeat") private var sendHeartbeat = true
     @AppStorage("rotationV2") private var rotation = 270.0
@@ -51,8 +52,35 @@ struct ContentView: View {
     private func connect() {
         if sendHeartbeat { link.start(host: host) }
         pushTrim()
+        hold.reset()
         stream.start(host: host)
         UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    /// Camera switch: one datagram on the control port, then reopen the RTSP session,
+    /// which pyDroneWire found necessary after a switch.
+    private func switchCamera(_ id: UInt8) {
+        link.sendRaw(Data([0x06, id]))
+        stream.stop()
+        hold.reset()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            stream.start(host: host)
+        }
+    }
+
+    /// Arrow showing the estimated drone motion in screen coordinates.
+    private var motionArrow: some View {
+        Canvas { ctx, size in
+            let c = CGPoint(x: size.width / 2, y: size.height / 2)
+            let scale = 12.0
+            let end = CGPoint(x: c.x + hold.motionX * scale, y: c.y + hold.motionY * scale)
+            var ring = Path(); ring.addEllipse(in: CGRect(x: c.x - 4, y: c.y - 4, width: 8, height: 8))
+            ctx.fill(ring, with: .color(.secondary))
+            var p = Path(); p.move(to: c); p.addLine(to: end)
+            ctx.stroke(p, with: .color(.green), lineWidth: 4)
+        }
+        .frame(width: 96, height: 96)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.15)))
     }
 
     private func disconnect() {
@@ -67,7 +95,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 008 - Centred handshake")
+                Text("Experiment 009 - Optical-flow hold")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -127,7 +155,7 @@ struct ContentView: View {
 
                     HStack {
                         Text("Hover \(Int(flight.hoverSeconds)) s")
-                        Slider(value: $flight.hoverSeconds, in: 2...15, step: 1)
+                        Slider(value: $flight.hoverSeconds, in: 2...30, step: 1)
                             .disabled(flight.inFlight)
                     }
                     .font(.callout)
@@ -173,6 +201,53 @@ struct ContentView: View {
                         }
                     }
                     .font(.callout)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
+
+                // MARK: Hold
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Auto-hold (optical flow)").font(.title3.bold())
+
+                    HStack(spacing: 12) {
+                        Button("Front cam") { switchCamera(0x01) }
+                            .buttonStyle(.bordered).disabled(!link.isUp)
+                        Button("Bottom cam") { switchCamera(0x02) }
+                            .buttonStyle(.bordered).disabled(!link.isUp)
+                        Text("use bottom for hold").font(.caption).foregroundStyle(.secondary)
+                    }
+
+                    HStack(alignment: .top, spacing: 14) {
+                        motionArrow
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(format: "motion %.1f, %.1f px/f", hold.motionX, hold.motionY))
+                            Text("auto roll \(hold.autoRoll) pitch \(hold.autoPitch)")
+                            Text(String(format: "learned lean %.1f, %.1f", hold.integralX, hold.integralY))
+                            Text("\(hold.flowStatus) (\(hold.framesMeasured))")
+                        }
+                        .font(.footnote.monospaced())
+                    }
+
+                    Text("Hand-held check first, hold OFF: bottom cam, drone 30 cm over a textured floor, move it right: the arrow should point right. Move it forward: arrow up. If not, change the rotation picker until it does.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    Toggle("Auto-hold during hover", isOn: $hold.enabled)
+                        .font(.callout)
+                        .tint(.green)
+                    HStack {
+                        Text("gain \(String(format: "%.1f", hold.gain))").font(.callout)
+                        Slider(value: $hold.gain, in: 0...10, step: 0.5)
+                    }
+                    HStack {
+                        Text("max \(Int(hold.maxCorrection))").font(.callout)
+                        Slider(value: $hold.maxCorrection, in: 5...40, step: 5)
+                    }
+                    HStack(spacing: 16) {
+                        Toggle("flip roll", isOn: $hold.flipRoll).font(.callout)
+                        Toggle("flip pitch", isOn: $hold.flipPitch).font(.callout)
+                    }
+                    Text("If the drone accelerates away instead of settling, land and flip the axis that ran off. Start with gain 3 and max 15.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
@@ -276,12 +351,20 @@ struct ContentView: View {
                 .font(.callout)
 
                 Divider()
-                Label("Throttle and yaw are always centred. Roll and pitch move only by the trim you set and while a nudge button is held. Commands: one-key takeoff/land, emergency stop, gyro calibrate.", systemImage: "shield.checkered")
+                Label("Throttle and yaw are always centred. Roll and pitch move only in the hover: by trim, by a held nudge button, and by auto-hold within its max. Commands: one-key takeoff/land, emergency stop, gyro calibrate, camera switch.", systemImage: "shield.checkered")
                     .font(.callout)
             }
             .padding()
         }
-        .onAppear { flight.link = link; pushTrim() }
+        .onAppear {
+            flight.link = link
+            hold.link = link
+            hold.rotation = rotation
+            stream.onFrame = { [weak hold] frame in hold?.process(frame) }
+            flight.onHoverStart = { [weak hold] in hold?.reset() }
+            pushTrim()
+        }
+        .onChange(of: rotation) { r in hold.rotation = r }
         .onChange(of: scenePhase) { phase in
             if phase != .active { flight.appWentToBackground() }
         }

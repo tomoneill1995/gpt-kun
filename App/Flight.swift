@@ -25,6 +25,8 @@ final class FlightController: ObservableObject {
     @Published var log: [String] = []
 
     var link: DroneLink?
+    /// Invoked when the hover phase begins (used to reset the hold controller).
+    var onHoverStart: (() -> Void)?
 
     private var generation = 0
     private var watchdog: Timer?
@@ -59,7 +61,8 @@ final class FlightController: ObservableObject {
         }
         after(2.0, gen) {
             link.setCommand(DroneLink.cmdNone)
-            link.setOffsetsEnabled(true)        // trim and nudge act only from here
+            self.onHoverStart?()
+            link.setOffsetsEnabled(true)        // trim, nudge and auto-hold act only from here
             self.enter(.hover, for: self.hoverSeconds)
         }
         after(2.0 + hoverSeconds, gen) {

@@ -23,6 +23,9 @@ final class RTSPClient: ObservableObject {
     @Published var rtpInfo = ""
     @Published var log: [String] = []
 
+    /// Called on the decode queue with every decoded frame, before it is published.
+    var onFrame: ((CGImage) -> Void)?
+
     private let queue = DispatchQueue(label: "gptkun.rtsp")
     private let decodeQueue = DispatchQueue(label: "gptkun.decode", qos: .userInteractive)
     private let assembler = RTPJPEGAssembler()
@@ -348,6 +351,7 @@ final class RTSPClient: ObservableObject {
             let options = [kCGImageSourceShouldCache: false] as CFDictionary
             if let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
                let cg = CGImageSourceCreateImageAtIndex(src, 0, options) {
+                self.onFrame?(cg)
                 let image = UIImage(cgImage: cg)
                 DispatchQueue.main.async {
                     self.frame = image

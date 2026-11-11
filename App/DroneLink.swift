@@ -36,6 +36,7 @@ final class DroneLink: ObservableObject {
     // Stick offsets from centre, in frame units (-127...127). Only touched on `queue`.
     private var trimRoll = 0, trimPitch = 0
     private var nudgeRoll = 0, nudgePitch = 0
+    private var autoRoll = 0, autoPitch = 0     // from HoldController
     // Offsets are applied only while this is true (set by FlightController in hover).
     // Handshake, takeoff, landing and calibration always see exactly centred sticks.
     private var offsetsEnabled = false
@@ -105,7 +106,12 @@ final class DroneLink: ObservableObject {
 
     func stopControlFrames() {
         controlTimer?.cancel(); controlTimer = nil
-        queue.async { self.command = Self.cmdNone; self.nudgeRoll = 0; self.nudgePitch = 0; self.offsetsEnabled = false }
+        queue.async {
+            self.command = Self.cmdNone
+            self.nudgeRoll = 0; self.nudgePitch = 0
+            self.autoRoll = 0; self.autoPitch = 0
+            self.offsetsEnabled = false
+        }
         DispatchQueue.main.async { self.controlRunning = false }
     }
 
@@ -125,17 +131,30 @@ final class DroneLink: ObservableObject {
         queue.async { self.nudgeRoll = roll; self.nudgePitch = pitch }
     }
 
-    /// Allow trim and nudge to move the sticks. Off outside the hover phase.
+    /// Correction from the optical-flow hold controller. Zero when hold is off.
+    func setAuto(roll: Int, pitch: Int) {
+        queue.async { self.autoRoll = roll; self.autoPitch = pitch }
+    }
+
+    /// Allow trim, nudge and auto-hold to move the sticks. Off outside the hover phase.
     func setOffsetsEnabled(_ on: Bool) {
         queue.async { self.offsetsEnabled = on }
+    }
+
+    /// Send one arbitrary datagram on the control port (camera switch `06 01` / `06 02`).
+    func sendRaw(_ data: Data) {
+        queue.async { [weak self] in
+            guard let c = self?.connection else { return }
+            c.send(content: data, completion: .contentProcessed { _ in })
+        }
     }
 
     /// pyDroneWire's 21-byte GL frame: 03 66 14, roll, pitch, throttle, yaw, cmd, 0x02,
     /// ten zero bytes, checksum (XOR of bytes 3...18), 0x99. Throttle and yaw stay centred.
     private func buildFrame(command: UInt8) -> Data {
         func stick(_ offset: Int) -> UInt8 { UInt8(max(1, min(255, 0x80 + offset))) }
-        let roll = offsetsEnabled ? stick(trimRoll + nudgeRoll) : 0x80
-        let pitch = offsetsEnabled ? stick(trimPitch + nudgePitch) : 0x80
+        let roll = offsetsEnabled ? stick(trimRoll + nudgeRoll + autoRoll) : 0x80
+        let pitch = offsetsEnabled ? stick(trimPitch + nudgePitch + autoPitch) : 0x80
         let throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
         let flags2: UInt8 = 0x02
         let checksum = roll ^ pitch ^ throttle ^ yaw ^ command ^ flags2
