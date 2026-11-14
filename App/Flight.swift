@@ -29,7 +29,7 @@ final class FlightController: ObservableObject {
     var onHoverStart: (() -> Void)?
     /// While this returns true the hover is extended (a 360 scan in progress), up to a cap.
     var scanActive: (() -> Bool)?
-    private let hoverExtensionCap = 45.0
+    private let hoverExtensionCap = 80.0
 
     private var generation = 0
     private var watchdog: Timer?

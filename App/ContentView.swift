@@ -103,7 +103,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 010 - Look around")
+                Text("Experiment 011 - Look around, held")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -267,7 +267,11 @@ struct ContentView: View {
                 // MARK: Look around
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Look around (360 in 4 stills)").font(.title3.bold())
-                    Text("During a hover: front camera, four 90-degree turns measured from the video, a still after each, then back to the bottom camera. Hold pauses meanwhile and keeps only its learned lean. The hover is extended until the scan finishes.")
+                    Toggle("Safe mode: hold stays on, glance per still", isOn: $scan.safeMode)
+                        .font(.callout).tint(.green)
+                    Text(scan.safeMode
+                         ? "Turns happen on the bottom camera with the hold running; rotation is measured from the floor. For each still it glances to the front camera (about 7 s blind), then returns and re-centres. About 50 s in all; the hover is extended for it."
+                         : "Front camera for the whole scan with the hold paused. Only safe on a drone that can hot-switch cameras, which this one cannot.")
                         .font(.caption).foregroundStyle(.secondary)
 
                     Toggle("Run scan automatically 3 s into each hover", isOn: $scanInHover)
@@ -284,9 +288,11 @@ struct ContentView: View {
                         Text("yaw \(Int(scan.yawAmount))").font(.callout)
                         Slider(value: $scan.yawAmount, in: 15...60, step: 5)
                     }
-                    HStack {
-                        Text("lens FOV \(Int(scan.hfov))").font(.callout)
-                        Slider(value: $scan.hfov, in: 40...100, step: 5)
+                    if !scan.safeMode {
+                        HStack {
+                            Text("lens FOV \(Int(scan.hfov))").font(.callout)
+                            Slider(value: $scan.hfov, in: 40...100, step: 5)
+                        }
                     }
                     Toggle("Save stills to Photos", isOn: $scan.savePhotos).font(.callout)
                     Text("\(scan.status)  turn \(String(format: "%.0f", scan.turnDegrees)) deg")
@@ -305,7 +311,9 @@ struct ContentView: View {
                     ForEach(Array(scan.log.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.system(size: 10, design: .monospaced))
                     }
-                    Text("If four turns overshoot the start heading, lower the lens FOV; if they fall short, raise it. If the drone barely turns in 4 s, raise yaw.")
+                    Text(scan.safeMode
+                         ? "Rotation comes from the floor image, no lens guess needed. If the drone barely turns in 4 s, raise yaw; if it overshoots 90, lower it."
+                         : "If four turns overshoot the start heading, lower the lens FOV; if they fall short, raise it.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(12)
@@ -438,6 +446,7 @@ struct ContentView: View {
             scan.stillHovering = { [weak flight] in flight?.phase == .hover }
             stream.onFrame = { [weak hold] frame in hold?.process(frame) }
             hold.onShift = { [weak scan] x, y, w in scan?.onShift(x: x, y: y, screenWidth: w) }
+            hold.onRotation = { [weak scan] d in scan?.onRotation(degrees: d) }
             flight.scanActive = { [weak scan] in scan?.active ?? false }
             flight.onHoverStart = { [weak hold, weak scan] in
                 hold?.reset()

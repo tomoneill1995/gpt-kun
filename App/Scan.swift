@@ -1,21 +1,25 @@
 import Foundation
 import UIKit
 
-/// 360-degree look-around during a hover: front camera up, four turns of 90 degrees
-/// each measured from the video, a still captured after each turn, bottom camera back.
+/// 360-degree look-around during a hover, in two flavours.
 ///
-/// Heading is integrated from the per-frame horizontal scene shift the hold
-/// controller already computes: degrees = pixels * (horizontal field of view / frame
-/// width). The field of view is a user setting; if four turns bring the drone back
-/// to its start heading, it is right. Each turn also has a time cap in case the
-/// registration loses the scene (blank wall, motion blur).
+/// Safe mode (default): the drone stays on the bottom camera with the position hold
+/// running. Each 90-degree turn is measured by fitting a homography between frames
+/// of the floor. For every still it glances: front camera, capture, bottom camera,
+/// a couple of seconds for the hold to re-centre. Blind time is about seven seconds
+/// per still instead of the whole scan.
+///
+/// Fast mode: front camera for the whole scan, turns measured from horizontal shift
+/// through the lens FOV, hold paused throughout. Only sensible if the drone could
+/// hot-switch cameras, which this one cannot (verified 2026-11-14).
 final class ScanController: ObservableObject {
     @Published var active = false
     @Published var status = "idle"
     @Published var stills: [UIImage] = []
     @Published var turnDegrees = 0.0
     @Published var yawAmount = 30.0        // stick units, positive = clockwise per pyDroneWire
-    @Published var hfov = 60.0             // degrees, horizontal field of view of the front camera
+    @Published var hfov = 60.0             // degrees, fast mode only
+    @Published var safeMode = true
     @Published var savePhotos = true
     @Published var log: [String] = []
 
@@ -23,25 +27,34 @@ final class ScanController: ObservableObject {
     var hold: HoldController?
     var stream: RTSPClient?
     var rotation = 270.0
-    /// Provided by the view: switch camera, honouring the hot-switch setting.
     var switchCamera: ((UInt8) -> Void)?
     var cameraSwitchDelay: TimeInterval = 3.0
-    /// Returns false if the flight is no longer in the hover (abort the scan).
     var stillHovering: (() -> Bool)?
 
     private let maxTurnSeconds = 4.0
-    private let settleSeconds = 1.5
+    private let settleAfterTurn = 2.0      // hold re-centres on the bottom camera
+    private let settleBeforeStill = 0.8    // front camera up, let the picture come in
+    private let recentreAfterGlance = 2.5
     private var generation = 0
     private var turning = false
     private var accumulated = 0.0
     private var turnStarted = Date()
     private var tick: Timer?
 
-    // MARK: - Shift input (decode queue)
+    // MARK: - Inputs from HoldController (decode queue)
 
     func onShift(x: Double, y: Double, screenWidth: Double) {
-        guard turning, screenWidth > 0 else { return }
+        guard turning, !safeMode, screenWidth > 0 else { return }
         let degrees = x * (hfov / screenWidth)
+        DispatchQueue.main.async {
+            guard self.turning else { return }
+            self.accumulated += degrees
+            self.turnDegrees = self.accumulated
+        }
+    }
+
+    func onRotation(degrees: Double) {
+        guard turning, safeMode else { return }
         DispatchQueue.main.async {
             guard self.turning else { return }
             self.accumulated += degrees
@@ -57,11 +70,17 @@ final class ScanController: ObservableObject {
         let gen = generation
         active = true
         stills = []
-        note("scan start: front camera")
-        hold.paused = true
-        switchCamera?(0x01)
-        status = "switching to front camera"
-        after(cameraSwitchDelay + 0.5, gen) { self.turn(index: 0, gen: gen, link: link) }
+        if safeMode {
+            note("safe scan: hold stays on, glance per still")
+            glance(index: 0, gen: gen, link: link, hold: hold)
+        } else {
+            note("fast scan: front camera throughout")
+            hold.paused = true
+            hold.frontDamping = true
+            switchCamera?(0x01)
+            status = "switching to front camera"
+            after(cameraSwitchDelay + 0.5, gen) { self.fastTurn(index: 0, gen: gen, link: link, hold: hold) }
+        }
     }
 
     func abort(reason: String) {
@@ -69,31 +88,56 @@ final class ScanController: ObservableObject {
         generation += 1
         finishTurn()
         link?.setYaw(0)
+        hold?.measureRotation = false
+        hold?.frontDamping = false
         hold?.paused = false
         active = false
         status = "aborted: \(reason)"
         note("aborted: \(reason)")
     }
 
-    private func turn(index: Int, gen: Int, link: DroneLink) {
+    // MARK: Safe mode
+
+    private func glance(index: Int, gen: Int, link: DroneLink, hold: HoldController) {
         guard stillHovering?() ?? true else { abort(reason: "not hovering"); return }
         if index >= 4 {
-            status = "back to bottom camera"
-            note("four stills captured, switching back")
-            switchCamera?(0x02)
-            after(cameraSwitchDelay, gen) {
-                self.hold?.paused = false
-                self.active = false
-                self.status = "done: \(self.stills.count) stills"
-            }
+            active = false
+            status = "done: \(stills.count) stills"
+            note("done")
             return
         }
-        status = "turn \(index + 1) of 4"
-        note("turn \(index + 1): yaw \(Int(yawAmount))")
+        status = "still \(index + 1): front camera"
+        hold.paused = true
+        hold.frontDamping = true
+        switchCamera?(0x01)
+        after(cameraSwitchDelay + settleBeforeStill, gen) {
+            self.capture(index: index)
+            self.status = "still \(index + 1): back to bottom"
+            self.switchCamera?(0x02)
+            self.after(self.cameraSwitchDelay, gen) {
+                hold.frontDamping = false
+                hold.paused = false
+                self.status = "re-centring"
+                self.after(self.recentreAfterGlance, gen) {
+                    if index == 3 {
+                        self.glance(index: 4, gen: gen, link: link, hold: hold)
+                    } else {
+                        self.safeTurn(index: index, gen: gen, link: link, hold: hold)
+                    }
+                }
+            }
+        }
+    }
+
+    private func safeTurn(index: Int, gen: Int, link: DroneLink, hold: HoldController) {
+        guard stillHovering?() ?? true else { abort(reason: "not hovering"); return }
+        status = "turn \(index + 1): yaw on bottom camera"
+        note("turn \(index + 1): yaw \(Int(yawAmount)), measuring rotation")
         accumulated = 0
         turnDegrees = 0
         turning = true
         turnStarted = Date()
+        hold.measureRotation = true
         link.setYaw(Int(yawAmount))
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
@@ -104,14 +148,52 @@ final class ScanController: ObservableObject {
             guard done || timedOut else { return }
             self.finishTurn()
             link.setYaw(0)
+            hold.measureRotation = false
             self.note(String(format: "turn %d ended at %.0f deg after %.1f s%@", index + 1, self.accumulated, elapsed, timedOut ? " (time cap)" : ""))
-            self.status = "settling"
-            self.after(self.settleSeconds, gen) {
-                self.capture(index: index)
-                self.turn(index: index + 1, gen: gen, link: link)
+            self.status = "settling on hold"
+            self.after(self.settleAfterTurn, gen) {
+                self.glance(index: index + 1, gen: gen, link: link, hold: hold)
             }
         }
     }
+
+    // MARK: Fast mode
+
+    private func fastTurn(index: Int, gen: Int, link: DroneLink, hold: HoldController) {
+        guard stillHovering?() ?? true else { abort(reason: "not hovering"); return }
+        if index >= 4 {
+            status = "back to bottom camera"
+            switchCamera?(0x02)
+            after(cameraSwitchDelay, gen) {
+                hold.frontDamping = false
+                hold.paused = false
+                self.active = false
+                self.status = "done: \(self.stills.count) stills"
+            }
+            return
+        }
+        status = "turn \(index + 1) of 4"
+        accumulated = 0
+        turnDegrees = 0
+        turning = true
+        turnStarted = Date()
+        link.setYaw(Int(yawAmount))
+        tick?.invalidate()
+        tick = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, self.generation == gen, self.turning else { return }
+            let elapsed = Date().timeIntervalSince(self.turnStarted)
+            guard abs(self.accumulated) >= 90 || elapsed >= self.maxTurnSeconds else { return }
+            self.finishTurn()
+            link.setYaw(0)
+            self.note(String(format: "turn %d ended at %.0f deg after %.1f s", index + 1, self.accumulated, elapsed))
+            self.after(1.5, gen) {
+                self.capture(index: index)
+                self.fastTurn(index: index + 1, gen: gen, link: link, hold: hold)
+            }
+        }
+    }
+
+    // MARK: - Helpers
 
     private func finishTurn() {
         turning = false
@@ -128,7 +210,6 @@ final class ScanController: ObservableObject {
         }
     }
 
-    /// Bake the display rotation into the saved image.
     static func rotate(_ image: UIImage, degrees: Double) -> UIImage {
         let radians = degrees * .pi / 180
         let quarter = Int(degrees) % 180 != 0

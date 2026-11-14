@@ -41,6 +41,14 @@ final class HoldController: ObservableObject {
     /// Per-frame scene shift in screen coordinates plus the screen-space frame width,
     /// delivered on the decode queue. Used by ScanController to measure turns.
     var onShift: ((Double, Double, Double) -> Void)?
+    /// While true, a homography is also fitted and its rotation (degrees, this frame
+    /// relative to the previous one) is delivered here. Used to measure yaw on the
+    /// bottom camera while the hold keeps running.
+    var measureRotation = false
+    var onRotation: ((Double) -> Void)?
+    /// While paused with the front camera up, still damp sideways motion with roll
+    /// only (no learning, half gain). Forward/back is not observable from the front.
+    var frontDamping = false
 
     private var previous: CGImage?
     private var velX = 0.0, velY = 0.0
@@ -82,6 +90,17 @@ final class HoldController: ObservableObject {
         // Image content shift from previous to current, raw frame coordinates.
         let shiftX = Double(obs.alignmentTransform.tx)
         let shiftY = Double(obs.alignmentTransform.ty)
+
+        if measureRotation {
+            let hreq = VNHomographicImageRegistrationRequest(targetedCGImage: frame, options: [:])
+            if (try? VNImageRequestHandler(cgImage: prev, options: [:]).perform([hreq])) != nil,
+               let hobs = hreq.results?.first as? VNImageHomographicAlignmentObservation {
+                let m = hobs.warpTransform
+                // Rotation of the linear part: angle of the first column.
+                let degrees = Double(atan2(m.columns.0.y, m.columns.0.x)) * 180 / .pi
+                if abs(degrees) < 30 { onRotation?(degrees) }
+            }
+        }
         guard abs(shiftX) < maxPlausibleShift, abs(shiftY) < maxPlausibleShift else {
             setStatus("shift too large, ignored")
             return
@@ -104,16 +123,24 @@ final class HoldController: ObservableObject {
         var roll = 0, pitch = 0
         if enabled, let link {
             let live = !paused
-            let vx = (!live || abs(velX) < deadband) ? 0 : velX
-            let vy = (!live || abs(velY) < deadband) ? 0 : velY
-            if live {
+            // While yawing on the bottom camera the translation estimate is unreliable:
+            // keep the integral, drop the proportional term.
+            let useP = live && !measureRotation
+            var vx = (!useP || abs(velX) < deadband) ? 0 : velX
+            let vy = (!useP || abs(velY) < deadband) ? 0 : velY
+            if useP {
                 intX = max(-integralClamp, min(integralClamp, intX + integralGain * vx))
                 intY = max(-integralClamp, min(integralClamp, intY + integralGain * vy))
+            }
+            var pGain = gain
+            if paused && frontDamping {
+                vx = abs(velX) < deadband ? 0 : velX
+                pGain = gain * 0.5
             }
 
             // Moving right (+x) needs roll left (negative); moving down-screen (+y)
             // is backwards, needs pitch forward (positive).
-            var r = -(gain * vx + intX)
+            var r = -(pGain * vx + intX)
             var p = (gain * vy + intY)
             if flipRoll { r = -r }
             if flipPitch { p = -p }

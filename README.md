@@ -99,6 +99,12 @@ Front camera works too but confuses turning with sideways drift, so expect worse
 - **Telemetry history.** Every distinct 11-byte reply is listed with first-seen time and count. So far it has been constant on the ground; fly and see whether any byte tracks battery, altitude or flow quality. The built-in optical-flow sensor is internal and never reported directly.
 - **Look around.** In a hover: front camera, yaw stick at a set amount until the video says 90 degrees have gone by (horizontal shift times lens FOV over frame width), settle 1.5 s, capture a still, four times, then bottom camera and hold resumes. Stills show as thumbnails and go to Photos. Each turn is capped at 4 s in case the scene is featureless. If four turns overshoot the start heading, lower the lens FOV setting; if short, raise it. The hover is extended while the scan runs, up to 45 s.
 
+**Result (2026-11-14):** hot switch does nothing; every camera change is a 3 s reopen. The fast scan turned correctly but the drone drifted off and crashed during the long blind stretch with the hold paused.
+
+## v0.11: safe scan
+
+Default scan mode keeps the bottom camera and the hold running. Yaw is measured from the floor by fitting a homography between frames (Vision), so no lens guess is needed; the proportional term is dropped during the turn and the learned lean kept. For each still the drone glances: front camera (about 3 s reopen plus 0.8 s), capture, bottom camera (3 s), then 2.5 s for the hold to re-centre. While the front camera is up, horizontal image shift still drives a half-gain roll correction. Roughly 50 s for four stills; the hover extends up to 80 s. The old fast mode remains behind a toggle for drones that can hot-switch.
+
 ## After that
 
 Throttle on the nudge pad once its direction is known, a lower hover, then a restricted action set for GPT-kun.
