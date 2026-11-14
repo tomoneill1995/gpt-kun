@@ -20,5 +20,6 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: GPT-kun Camera
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to the drone's local Wi-Fi camera stream.
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: Save stills captured by the drone camera.
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO

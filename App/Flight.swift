@@ -27,6 +27,9 @@ final class FlightController: ObservableObject {
     var link: DroneLink?
     /// Invoked when the hover phase begins (used to reset the hold controller).
     var onHoverStart: (() -> Void)?
+    /// While this returns true the hover is extended (a 360 scan in progress), up to a cap.
+    var scanActive: (() -> Bool)?
+    private let hoverExtensionCap = 45.0
 
     private var generation = 0
     private var watchdog: Timer?
@@ -66,7 +69,17 @@ final class FlightController: ObservableObject {
             self.enter(.hover, for: self.hoverSeconds)
         }
         after(2.0 + hoverSeconds, gen) {
-            self.landSequence(reason: "hover time over")
+            self.landWhenScanDone(gen: gen, waited: 0)
+        }
+    }
+
+    private func landWhenScanDone(gen: Int, waited: Double) {
+        if scanActive?() == true, waited < hoverExtensionCap {
+            if waited == 0 { note("hover extended for scan") }
+            phaseEnds = Date().addingTimeInterval(1)
+            after(0.5, gen) { self.landWhenScanDone(gen: gen, waited: waited + 0.5) }
+        } else {
+            landSequence(reason: waited >= hoverExtensionCap ? "scan overran, landing" : "hover time over")
         }
     }
 

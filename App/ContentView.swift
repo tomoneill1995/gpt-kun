@@ -11,6 +11,9 @@ struct ContentView: View {
     @StateObject private var probe = PortProbe()
     @StateObject private var flight = FlightController()
     @StateObject private var hold = HoldController()
+    @StateObject private var scan = ScanController()
+    @AppStorage("hotSwitch") private var hotSwitch = false
+    @AppStorage("scanInHover") private var scanInHover = false
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
     @AppStorage("sendHeartbeat") private var sendHeartbeat = true
     @AppStorage("rotationV2") private var rotation = 270.0
@@ -57,16 +60,21 @@ struct ContentView: View {
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
-    /// Camera switch: one datagram on the control port, then reopen the RTSP session,
-    /// which pyDroneWire found necessary after a switch.
+    /// Camera switch: one datagram on the control port. By default the RTSP session is
+    /// reopened afterwards (pyDroneWire found that necessary, and this drone's telemetry
+    /// byte 1 = 2 says the same). "Hot switch" sends the command alone to test whether
+    /// the running stream simply changes camera.
     private func switchCamera(_ id: UInt8) {
         link.sendRaw(Data([0x06, id]))
-        stream.stop()
         hold.reset()
+        guard !hotSwitch else { return }
+        stream.stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             stream.start(host: host)
         }
     }
+
+    private var cameraSwitchDelay: TimeInterval { hotSwitch ? 0.7 : 3.0 }
 
     /// Arrow showing the estimated drone motion in screen coordinates.
     private var motionArrow: some View {
@@ -95,7 +103,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 009 - Optical-flow hold")
+                Text("Experiment 010 - Look around")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -216,6 +224,10 @@ struct ContentView: View {
                             .buttonStyle(.bordered).disabled(!link.isUp)
                         Text("use bottom for hold").font(.caption).foregroundStyle(.secondary)
                     }
+                    Toggle("Hot switch (send command only, keep the stream open)", isOn: $hotSwitch)
+                        .font(.callout)
+                    Text("Test: with video live, switch cameras with this on. If the picture changes within a second the drone hot-switches; if it freezes, the watchdog reopens the stream after 4 s and the answer is no.")
+                        .font(.caption).foregroundStyle(.secondary)
 
                     HStack(alignment: .top, spacing: 14) {
                         motionArrow
@@ -247,6 +259,53 @@ struct ContentView: View {
                         Toggle("flip pitch", isOn: $hold.flipPitch).font(.callout)
                     }
                     Text("If the drone accelerates away instead of settling, land and flip the axis that ran off. Start with gain 3 and max 15.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)))
+
+                // MARK: Look around
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Look around (360 in 4 stills)").font(.title3.bold())
+                    Text("During a hover: front camera, four 90-degree turns measured from the video, a still after each, then back to the bottom camera. Hold pauses meanwhile and keeps only its learned lean. The hover is extended until the scan finishes.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    Toggle("Run scan automatically 3 s into each hover", isOn: $scanInHover)
+                        .font(.callout)
+                    HStack(spacing: 12) {
+                        Button("Scan now") { scan.start() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(flight.phase != .hover || scan.active)
+                        Button("Abort scan") { scan.abort(reason: "user") }
+                            .buttonStyle(.bordered)
+                            .disabled(!scan.active)
+                    }
+                    HStack {
+                        Text("yaw \(Int(scan.yawAmount))").font(.callout)
+                        Slider(value: $scan.yawAmount, in: 15...60, step: 5)
+                    }
+                    HStack {
+                        Text("lens FOV \(Int(scan.hfov))").font(.callout)
+                        Slider(value: $scan.hfov, in: 40...100, step: 5)
+                    }
+                    Toggle("Save stills to Photos", isOn: $scan.savePhotos).font(.callout)
+                    Text("\(scan.status)  turn \(String(format: "%.0f", scan.turnDegrees)) deg")
+                        .font(.footnote.monospaced())
+                    if !scan.stills.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(Array(scan.stills.enumerated()), id: \.offset) { _, img in
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(height: 70)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+                    ForEach(Array(scan.log.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.system(size: 10, design: .monospaced))
+                    }
+                    Text("If four turns overshoot the start heading, lower the lens FOV; if they fall short, raise it. If the drone barely turns in 4 s, raise yaw.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(12)
@@ -341,6 +400,16 @@ struct ContentView: View {
                 }
                 .font(.footnote.monospaced())
 
+                DisclosureGroup("Telemetry values seen (first time, bytes, count)") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(link.replyHistory.enumerated()), id: \.offset) { _, row in
+                            Text("\(row.time)  \(row.hex)  x\(row.count)")
+                                .font(.system(size: 10, design: .monospaced))
+                        }
+                    }
+                }
+                .font(.callout)
+
                 DisclosureGroup("RTSP log", isExpanded: $showLog) {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(stream.log.enumerated()), id: \.offset) { _, line in
@@ -360,11 +429,29 @@ struct ContentView: View {
             flight.link = link
             hold.link = link
             hold.rotation = rotation
+            scan.link = link
+            scan.hold = hold
+            scan.stream = stream
+            scan.rotation = rotation
+            scan.cameraSwitchDelay = cameraSwitchDelay
+            scan.switchCamera = { id in switchCamera(id) }
+            scan.stillHovering = { [weak flight] in flight?.phase == .hover }
             stream.onFrame = { [weak hold] frame in hold?.process(frame) }
-            flight.onHoverStart = { [weak hold] in hold?.reset() }
+            hold.onShift = { [weak scan] x, y, w in scan?.onShift(x: x, y: y, screenWidth: w) }
+            flight.scanActive = { [weak scan] in scan?.active ?? false }
+            flight.onHoverStart = { [weak hold, weak scan] in
+                hold?.reset()
+                if scanInHover {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { scan?.start() }
+                }
+            }
             pushTrim()
         }
-        .onChange(of: rotation) { r in hold.rotation = r }
+        .onChange(of: rotation) { r in hold.rotation = r; scan.rotation = r }
+        .onChange(of: hotSwitch) { _ in scan.cameraSwitchDelay = cameraSwitchDelay }
+        .onChange(of: flight.phase) { p in
+            if p != .hover, scan.active { scan.abort(reason: "flight phase \(p.rawValue)") }
+        }
         .onChange(of: scenePhase) { phase in
             if phase != .active { flight.appWentToBackground() }
         }

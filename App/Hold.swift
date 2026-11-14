@@ -35,6 +35,12 @@ final class HoldController: ObservableObject {
 
     var rotation = 270.0
     var link: DroneLink?
+    /// While paused (front camera up, or a turn in progress) only the learned lean
+    /// is applied and nothing is learned. Set by ScanController.
+    var paused = false
+    /// Per-frame scene shift in screen coordinates plus the screen-space frame width,
+    /// delivered on the decode queue. Used by ScanController to measure turns.
+    var onShift: ((Double, Double, Double) -> Void)?
 
     private var previous: CGImage?
     private var velX = 0.0, velY = 0.0
@@ -87,6 +93,9 @@ final class HoldController: ObservableObject {
         let sy = shiftX * sin(theta) + shiftY * cos(theta)
         // Camera moving right makes the scene slide left: drone motion is minus the shift.
         let mx = -sx, my = -sy
+        let quarterTurn = Int(rotation) % 180 != 0
+        let screenWidth = Double(quarterTurn ? frame.height : frame.width)
+        onShift?(sx, sy, screenWidth)
 
         // Low-pass the velocity estimate.
         velX = 0.5 * velX + 0.5 * mx
@@ -94,10 +103,13 @@ final class HoldController: ObservableObject {
 
         var roll = 0, pitch = 0
         if enabled, let link {
-            let vx = abs(velX) < deadband ? 0 : velX
-            let vy = abs(velY) < deadband ? 0 : velY
-            intX = max(-integralClamp, min(integralClamp, intX + integralGain * vx))
-            intY = max(-integralClamp, min(integralClamp, intY + integralGain * vy))
+            let live = !paused
+            let vx = (!live || abs(velX) < deadband) ? 0 : velX
+            let vy = (!live || abs(velY) < deadband) ? 0 : velY
+            if live {
+                intX = max(-integralClamp, min(integralClamp, intX + integralGain * vx))
+                intY = max(-integralClamp, min(integralClamp, intY + integralGain * vy))
+            }
 
             // Moving right (+x) needs roll left (negative); moving down-screen (+y)
             // is backwards, needs pitch forward (positive).

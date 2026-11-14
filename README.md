@@ -91,6 +91,14 @@ The drone reports no position, so the app measures drift from the video: Vision'
 
 Front camera works too but confuses turning with sideways drift, so expect worse hold.
 
+**Result (2026-11-14):** auto-hold on the bottom camera "seems to be working pretty well".
+
+## v0.10: hot-switch test, telemetry history, 360 look-around
+
+- **One camera at a time.** The drone has a single stream; `06 01` / `06 02` choose which camera feeds it. This unit's telemetry byte 1 is 2, which other projects read as "switch needs an RTSP reopen". The **Hot switch** toggle sends the command without reopening so you can see whether the picture changes anyway. If it freezes, the stream watchdog reopens it after 4 s.
+- **Telemetry history.** Every distinct 11-byte reply is listed with first-seen time and count. So far it has been constant on the ground; fly and see whether any byte tracks battery, altitude or flow quality. The built-in optical-flow sensor is internal and never reported directly.
+- **Look around.** In a hover: front camera, yaw stick at a set amount until the video says 90 degrees have gone by (horizontal shift times lens FOV over frame width), settle 1.5 s, capture a still, four times, then bottom camera and hold resumes. Stills show as thumbnails and go to Photos. Each turn is capped at 4 s in case the scene is featureless. If four turns overshoot the start heading, lower the lens FOV setting; if short, raise it. The hover is extended while the scan runs, up to 45 s.
+
 ## After that
 
 Throttle on the nudge pad once its direction is known, a lower hover, then a restricted action set for GPT-kun.

@@ -37,6 +37,9 @@ final class DroneLink: ObservableObject {
     private var trimRoll = 0, trimPitch = 0
     private var nudgeRoll = 0, nudgePitch = 0
     private var autoRoll = 0, autoPitch = 0     // from HoldController
+    private var yawOffset = 0                   // from ScanController (positive = clockwise per pyDroneWire)
+    /// Distinct telemetry values seen, newest last, with first-seen time and count.
+    @Published var replyHistory: [(time: String, hex: String, count: Int)] = []
     // Offsets are applied only while this is true (set by FlightController in hover).
     // Handshake, takeoff, landing and calibration always see exactly centred sticks.
     private var offsetsEnabled = false
@@ -110,6 +113,7 @@ final class DroneLink: ObservableObject {
             self.command = Self.cmdNone
             self.nudgeRoll = 0; self.nudgePitch = 0
             self.autoRoll = 0; self.autoPitch = 0
+            self.yawOffset = 0
             self.offsetsEnabled = false
         }
         DispatchQueue.main.async { self.controlRunning = false }
@@ -136,6 +140,11 @@ final class DroneLink: ObservableObject {
         queue.async { self.autoRoll = roll; self.autoPitch = pitch }
     }
 
+    /// Yaw stick offset, used only by the 360 scan. Zero otherwise.
+    func setYaw(_ offset: Int) {
+        queue.async { self.yawOffset = offset }
+    }
+
     /// Allow trim, nudge and auto-hold to move the sticks. Off outside the hover phase.
     func setOffsetsEnabled(_ on: Bool) {
         queue.async { self.offsetsEnabled = on }
@@ -155,7 +164,8 @@ final class DroneLink: ObservableObject {
         func stick(_ offset: Int) -> UInt8 { UInt8(max(1, min(255, 0x80 + offset))) }
         let roll = offsetsEnabled ? stick(trimRoll + nudgeRoll + autoRoll) : 0x80
         let pitch = offsetsEnabled ? stick(trimPitch + nudgePitch + autoPitch) : 0x80
-        let throttle: UInt8 = 0x80, yaw: UInt8 = 0x80
+        let yaw = offsetsEnabled ? stick(yawOffset) : 0x80
+        let throttle: UInt8 = 0x80
         let flags2: UInt8 = 0x02
         let checksum = roll ^ pitch ^ throttle ^ yaw ^ command ^ flags2
         frameCounter += 1
@@ -182,6 +192,13 @@ final class DroneLink: ObservableObject {
                     self.lastReplyHex = hex
                     self.repliesSeen += 1
                     self.lastReplyAt = Date()
+                    if let i = self.replyHistory.lastIndex(where: { $0.hex == hex }) {
+                        self.replyHistory[i].count += 1
+                    } else {
+                        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+                        self.replyHistory.append((time: stamp, hex: hex, count: 1))
+                        if self.replyHistory.count > 24 { self.replyHistory.removeFirst() }
+                    }
                 }
             }
             if error == nil, self.connection === conn { self.receiveLoop(conn) }
