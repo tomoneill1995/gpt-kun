@@ -66,7 +66,7 @@ struct ContentView: View {
     /// the running stream simply changes camera.
     private func switchCamera(_ id: UInt8) {
         link.sendRaw(Data([0x06, id]))
-        hold.reset()
+        hold.resetFrameOnly()
         guard !hotSwitch else { return }
         stream.stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -103,7 +103,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 011 - Look around, held")
+                Text("Experiment 012 - Lean kept through glances")
                     .foregroundStyle(.secondary)
 
                 ZStack {

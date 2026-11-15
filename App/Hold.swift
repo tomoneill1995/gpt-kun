@@ -66,6 +66,14 @@ final class HoldController: ObservableObject {
         resetOutput()
     }
 
+    /// Call on a camera switch: forget the previous frame so the first frame from the
+    /// other camera is not registered against the old one, but KEEP the learned lean.
+    /// Wiping it here is what left the drone untrimmed during every glance in v0.11.
+    func resetFrameOnly() {
+        previous = nil
+        velX = 0; velY = 0
+    }
+
     private func resetOutput() {
         outRoll = 0; outPitch = 0
         link?.setAuto(roll: 0, pitch: 0)
