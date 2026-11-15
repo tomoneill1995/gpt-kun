@@ -76,6 +76,16 @@ Sources: [turbodrone](https://github.com/marshallrichards/turbodrone) `backend/p
 
 An iOS port of type B needs: a UDP socket bound to one port, the start packet loop, fragment reassembly keyed by frame id, header synthesis, and decoding via UIImage or ImageIO. No VLC needed.
 
+## Second drone: WiFi CAM family (TZH Electronics app "WiFi_CAM", id1442480207)
+
+SSID `WIFI_8K_W947610`. Source: turbodrone `backend/protocols/wifi_cam_*.py` and `models/wifi_cam_rc.py` (not yet verified on our unit).
+
+- Drone IP **192.168.4.153**. UDP only. Client uses ephemeral ports; replies come back to the port that sent.
+- **Video, UDP 8080:** send `42 76` to start. Drone sends 1472-byte (0x5C0) datagrams: 8-byte header `[frame id][last chunk 0/1][chunk count][resolution code][3 unused][retain]` then 1464 bytes of a complete JPEG split into chunks. Reassemble by frame id, finish on last-chunk flag, trim at EOI. No ACKs. `42 77` stop, `42 78` rotate, `42 79` switch camera (no reopen). An 8-byte `55 00 0X 00 00 00 0X 99` on the same socket reports camera type X (1 or 2).
+- **Control, UDP 8090:** short 8-byte frame `66 roll pitch throttle yaw flags chk 99`, chk = XOR of bytes 1..5; any axis or chk byte equal to 0x66/0x99 is bumped by one. Flags: 0x01 takeoff, 0x02 land, 0x04 emergency, 0x08 flip, 0x10 headless, 0x80 calibrate. Camera type 2 means the 20-byte extended frame `66 14 r p t y flags1 flags2 00x10 chk 99` (chk = XOR bytes 2..17); flags1 0x01 takeoff/land shared, 0x02 emergency, 0x04 calibrate, 0x08 flip; flags2 0x01 headless, 0x02 altitude hold. Centre 0x80.
+- No keep-alive known. No control-port telemetry parsed by turbodrone. The app treats video datagrams as proof of life.
+- Resolution code meanings unknown. Rate unspecified; app uses 20 Hz.
+
 ## Build pipeline facts
 
 - MobileVLCKit 3.7.0 through 3.7.5 exist on VideoLAN's CocoaPods server (3.7.5 dated 2026-10-31). The cocoapods.org page is stale and shows 4.0.0a2 from 2023.

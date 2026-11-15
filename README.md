@@ -105,6 +105,12 @@ Front camera works too but confuses turning with sideways drift, so expect worse
 
 Default scan mode keeps the bottom camera and the hold running. Yaw is measured from the floor by fitting a homography between frames (Vision), so no lens guess is needed; the proportional term is dropped during the turn and the learned lean kept. For each still the drone glances: front camera (about 3 s reopen plus 0.8 s), capture, bottom camera (3 s), then 2.5 s for the hold to re-centre. While the front camera is up, horizontal image shift still drives a half-gain roll correction. Roughly 50 s for four stills; the hover extends up to 80 s. The old fast mode remains behind a toggle for drones that can hot-switch.
 
+**Result (2026-11-15, v0.11):** crashed during a turn. Unresolved; v0.12 fixed a bug that wiped the learned lean on every camera switch. The homography yaw measurement is the next suspect.
+
+## v0.13: second drone, WiFi CAM family
+
+A "Drone" picker selects the dialect. **WiFi CAM** (TZH app, `WIFI_8K_xxxxxx`, 192.168.4.153): complete JPEG frames in UDP chunks on port 8080 after a `42 76` start, control on 8090 in an 8-byte frame with separate takeoff and land bits, camera switch by a single datagram with no stream reopen. Everything above the video and control layers (flight, hold, scan) is shared. Details in PROTOCOL-NOTES.md. Unverified on hardware: first test is camera only, then the props-off dry run.
+
 ## After that
 
 Throttle on the nudge pad once its direction is known, a lower hover, then a restricted action set for GPT-kun.

@@ -59,11 +59,11 @@ final class FlightController: ObservableObject {
 
         after(1.0, gen) {
             self.note("takeoff command")
-            link.setCommand(DroneLink.cmdTakeoffLand)
+            link.setCommand(.takeoff)
             self.enter(.takeoff, for: 1.0)
         }
         after(2.0, gen) {
-            link.setCommand(DroneLink.cmdNone)
+            link.setCommand(.none)
             self.onHoverStart?()
             link.setOffsetsEnabled(true)        // trim, nudge and auto-hold act only from here
             self.enter(.hover, for: self.hoverSeconds)
@@ -98,30 +98,30 @@ final class FlightController: ObservableObject {
         note("EMERGENCY STOP")
         if !link.controlRunning { link.startControlFrames() }
         link.setOffsetsEnabled(false)
-        link.setCommand(DroneLink.cmdEmergencyStop)
+        link.setCommand(.emergency)
         enter(.emergency, for: 1.5)
         after(1.5, gen) {
-            link.setCommand(DroneLink.cmdNone)
+            link.setCommand(.none)
             self.finish()
         }
     }
 
     /// Gyro calibration. Drone must sit flat and still. Holds the bit for 2 s with
     /// centred sticks, then stops the control frames again.
-    func calibrate(bit: UInt8) {
+    func calibrate(_ cmd: LinkCommand) {
         guard let link, phase == .idle, linkFresh else {
             note("calibrate: needs idle flight state and a live link")
             return
         }
         generation += 1
         let gen = generation
-        note(String(format: "calibrate gyro, command 0x%02X", bit))
+        note("calibrate gyro, \(cmd)")
         let wasRunning = link.controlRunning
         if !wasRunning { link.startControlFrames() }
         enter(.calibrating, for: 3.0)
-        after(1.0, gen) { link.setCommand(bit) }
+        after(1.0, gen) { link.setCommand(cmd) }
         after(3.0, gen) {
-            link.setCommand(DroneLink.cmdNone)
+            link.setCommand(.none)
             self.after(1.0, gen) {
                 if !wasRunning { link.stopControlFrames() }
                 self.countdownTimer?.invalidate(); self.countdownTimer = nil
@@ -148,10 +148,10 @@ final class FlightController: ObservableObject {
         note("landing: \(reason)")
         if !link.controlRunning { link.startControlFrames() }
         link.setOffsetsEnabled(false)           // centred sticks for the land command
-        link.setCommand(DroneLink.cmdTakeoffLand)
+        link.setCommand(.land)
         enter(.landing, for: 1.0)
         after(1.0, gen) {
-            link.setCommand(DroneLink.cmdNone)
+            link.setCommand(.none)
             self.enter(.settling, for: 4.0)
         }
         after(5.0, gen) {

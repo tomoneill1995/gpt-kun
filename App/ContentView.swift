@@ -6,7 +6,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var stream = RTSPClient()
+    @StateObject private var stream = VideoFeed()
     @StateObject private var link = DroneLink()
     @StateObject private var probe = PortProbe()
     @StateObject private var flight = FlightController()
@@ -15,7 +15,7 @@ struct ContentView: View {
     @AppStorage("hotSwitch") private var hotSwitch = false
     @AppStorage("scanInHover") private var scanInHover = false
     @AppStorage("droneHost") private var droneHost = "192.168.1.1"
-    @AppStorage("sendHeartbeat") private var sendHeartbeat = true
+    @AppStorage("droneProfile") private var profileRaw = DroneProfile.cooingdv.rawValue
     @AppStorage("rotationV2") private var rotation = 270.0
     @AppStorage("trimRoll") private var trimRoll = 0
     @AppStorage("trimPitch") private var trimPitch = 0
@@ -51,30 +51,35 @@ struct ContentView: View {
         !host.isEmpty && host.range(of: "^[A-Za-z0-9.-]+$", options: .regularExpression) != nil
     }
     private var linkFresh: Bool { Date().timeIntervalSince(link.lastReplyAt) < 2 }
+    private var profile: DroneProfile { DroneProfile(rawValue: profileRaw) ?? .cooingdv }
 
     private func connect() {
-        if sendHeartbeat { link.start(host: host) }
+        link.start(host: host, profile: profile)
         pushTrim()
         hold.reset()
-        stream.start(host: host)
+        stream.start(host: host, profile: profile)
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
-    /// Camera switch: one datagram on the control port. By default the RTSP session is
-    /// reopened afterwards (pyDroneWire found that necessary, and this drone's telemetry
-    /// byte 1 = 2 says the same). "Hot switch" sends the command alone to test whether
-    /// the running stream simply changes camera.
+    /// Camera switch. cooingdv: one datagram on the control port, then (unless hot
+    /// switch is on, which this drone ignores) the RTSP session is reopened. WiFi CAM:
+    /// `42 79` on the video socket toggles cameras with the stream running.
     private func switchCamera(_ id: UInt8) {
-        link.sendRaw(Data([0x06, id]))
         hold.resetFrameOnly()
-        guard !hotSwitch else { return }
-        stream.stop()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            stream.start(host: host)
+        switch profile {
+        case .wifiCam:
+            stream.wcam.switchCameraNow()
+        case .cooingdv:
+            link.sendRaw(Data([0x06, id]))
+            guard !hotSwitch else { return }
+            stream.stop()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                stream.start(host: host, profile: profile)
+            }
         }
     }
 
-    private var cameraSwitchDelay: TimeInterval { hotSwitch ? 0.7 : 3.0 }
+    private var cameraSwitchDelay: TimeInterval { (hotSwitch || profile == .wifiCam) ? 0.7 : 3.0 }
 
     /// Arrow showing the estimated drone motion in screen coordinates.
     private var motionArrow: some View {
@@ -103,7 +108,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("GPT-kun's Eyes")
                     .font(.largeTitle.bold())
-                Text("Experiment 012 - Lean kept through glances")
+                Text("Experiment 013 - Two drones")
                     .foregroundStyle(.secondary)
 
                 ZStack {
@@ -218,9 +223,9 @@ struct ContentView: View {
                     Text("Auto-hold (optical flow)").font(.title3.bold())
 
                     HStack(spacing: 12) {
-                        Button("Front cam") { switchCamera(0x01) }
+                        Button(profile == .wifiCam ? "Switch cam" : "Front cam") { switchCamera(0x01) }
                             .buttonStyle(.bordered).disabled(!link.isUp)
-                        Button("Bottom cam") { switchCamera(0x02) }
+                        Button(profile == .wifiCam ? "Switch cam" : "Bottom cam") { switchCamera(0x02) }
                             .buttonStyle(.bordered).disabled(!link.isUp)
                         Text("use bottom for hold").font(.caption).foregroundStyle(.secondary)
                     }
@@ -337,10 +342,10 @@ struct ContentView: View {
                     Text("Gyro calibration. Drone flat and still on the floor. The lights should flash a pattern for a second or two. Two candidate commands; try A first, with props off the first time.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack(spacing: 12) {
-                        Button("Calibrate A (0x80)") { flight.calibrate(bit: DroneLink.cmdCalibrateA) }
+                        Button("Calibrate A (0x80)") { flight.calibrate(.calibrateA) }
                             .buttonStyle(.bordered)
                             .disabled(flight.phase != .idle || !linkFresh)
-                        Button("Calibrate B (0x04)") { flight.calibrate(bit: DroneLink.cmdCalibrateB) }
+                        Button("Calibrate B (0x04)") { flight.calibrate(.calibrateB) }
                             .buttonStyle(.bordered)
                             .disabled(flight.phase != .idle || !linkFresh)
                     }
@@ -389,8 +394,18 @@ struct ContentView: View {
                 }
                 Text(probe.result).font(.footnote.monospaced())
 
-                Toggle("Send 1 s keep-alive to UDP 7099", isOn: $sendHeartbeat)
-                    .font(.callout)
+                Picker("Drone", selection: $profileRaw) {
+                    ForEach(DroneProfile.allCases) { p in Text(p.title).tag(p.rawValue) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(stream.running)
+                .onChange(of: profileRaw) { raw in
+                    if let p = DroneProfile(rawValue: raw) { droneHost = p.defaultHost }
+                }
+                Text(profile == .cooingdv
+                     ? "KY UFO: RTSP on 7070, control on 7099 with a 1 s keep-alive, 21-byte GL frame."
+                     : "WiFi CAM: JPEG chunks on UDP 8080, control on 8090, 8-byte frame (20-byte if camera type 2). No keep-alive known; the video datagrams count as the drone's heartbeat. Camera type: \(stream.wcam.cameraType).")
+                    .font(.caption).foregroundStyle(.secondary)
 
                 Picker("Rotate", selection: $rotation) {
                     Text("0").tag(0.0)
@@ -401,7 +416,7 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("rtp: \(stream.rtpPackets) pkts, \(stream.rtpBytes) B")
+                    Text("video: \(stream.packets) pkts, \(stream.bytes) B")
                     Text("frames: \(stream.framesDecoded) shown, \(stream.framesDropped) dropped, \(stream.decodeFailures) failed")
                     Text("link: \(link.state)  control frames: \(link.controlRunning ? "ON" : "off") (\(link.framesSent) sent)")
                     Text("drone replies: \(link.repliesSeen)  last: \(link.lastReplyHex.isEmpty ? "-" : link.lastReplyHex)")
@@ -418,7 +433,7 @@ struct ContentView: View {
                 }
                 .font(.callout)
 
-                DisclosureGroup("RTSP log", isExpanded: $showLog) {
+                DisclosureGroup("Video log", isExpanded: $showLog) {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(stream.log.enumerated()), id: \.offset) { _, line in
                             Text(line).font(.system(size: 10, design: .monospaced))
@@ -445,6 +460,8 @@ struct ContentView: View {
             scan.switchCamera = { id in switchCamera(id) }
             scan.stillHovering = { [weak flight] in flight?.phase == .hover }
             stream.onFrame = { [weak hold] frame in hold?.process(frame) }
+            stream.wcam.onAlive = { [weak link] in link?.noteAlive() }
+            stream.wcam.onCameraType = { [weak link] t in link?.wifiCamCameraType = t }
             hold.onShift = { [weak scan] x, y, w in scan?.onShift(x: x, y: y, screenWidth: w) }
             hold.onRotation = { [weak scan] d in scan?.onRotation(degrees: d) }
             flight.scanActive = { [weak scan] in scan?.active ?? false }

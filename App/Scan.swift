@@ -25,7 +25,7 @@ final class ScanController: ObservableObject {
 
     var link: DroneLink?
     var hold: HoldController?
-    var stream: RTSPClient?
+    var stream: VideoFeed?
     var rotation = 270.0
     var switchCamera: ((UInt8) -> Void)?
     var cameraSwitchDelay: TimeInterval = 3.0
